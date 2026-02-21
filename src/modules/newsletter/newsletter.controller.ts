@@ -26,4 +26,12 @@ export class NewsletterController {
   unsubscribe(@Body() unsubscribeDto: UnsubscribeDto) {
     return this.newsletterService.unsubscribe(unsubscribeDto.token);
   }
+
+  @Post('unsubscribe-by-email')
+  @ApiOperation({ summary: 'Unsubscribe from newsletter by email' })
+  @ApiResponse({ status: 200, description: 'Unsubscribed successfully' })
+  @ApiResponse({ status: 404, description: 'Email not found' })
+  unsubscribeByEmail(@Body() body: { email: string }) {
+    return this.newsletterService.unsubscribeByEmail(body.email);
+  }
 }

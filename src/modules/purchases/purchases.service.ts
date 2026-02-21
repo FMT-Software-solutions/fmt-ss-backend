@@ -267,6 +267,7 @@ export class PurchasesService {
       payment_method: params.paymentMethod || 'manual',
       external_transaction_id: params.externalTransactionId,
       payment_details: params.paymentDetails,
+      payment_reference: params.clientReference,
     };
 
     const { data: createdPurchase, error: purchaseError } = await adminSupabase

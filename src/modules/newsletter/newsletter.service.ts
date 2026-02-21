@@ -91,4 +91,39 @@ export class NewsletterService {
 
     return { message: 'Successfully unsubscribed from the newsletter' };
   }
+
+  async unsubscribeByEmail(email: string) {
+    const supabase: any = this.supabaseService.getClient();
+
+    // Check if email exists
+    const { data: subscriber, error: findError } = await supabase
+      .from('newsletter_subscribers')
+      .select('*')
+      .eq('email', email)
+      .single();
+
+    if (findError && findError.code !== 'PGRST116') {
+      console.error('Error finding subscriber:', findError);
+      throw new InternalServerErrorException('Database error');
+    }
+
+    if (!subscriber) {
+      // For security reasons, we might want to return success even if email not found,
+      // but for now let's be explicit as requested
+      throw new BadRequestException('This email is not subscribed to our newsletter');
+    }
+
+    // Delete subscriber
+    const { error: deleteError } = await supabase
+      .from('newsletter_subscribers')
+      .delete()
+      .eq('email', email);
+
+    if (deleteError) {
+      console.error('Error deleting subscriber:', deleteError);
+      throw new InternalServerErrorException('Failed to unsubscribe');
+    }
+
+    return { message: 'Successfully unsubscribed from the newsletter' };
+  }
 }
