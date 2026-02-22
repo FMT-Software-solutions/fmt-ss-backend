@@ -16,6 +16,7 @@ import { PaymentsModule } from './modules/payments/payments.module';
 import { FilesModule } from './modules/files/files.module';
 import { TestimonialsModule } from './modules/testimonials/testimonials.module';
 import { ReviewsModule } from './modules/reviews/reviews.module';
+import { QuotesModule } from './modules/quotes/quotes.module';
 
 @Module({
   imports: [
@@ -39,8 +40,9 @@ import { ReviewsModule } from './modules/reviews/reviews.module';
     FilesModule,
     TestimonialsModule,
     ReviewsModule,
+    QuotesModule,
   ],
   controllers: [AppController],
   providers: [AppService],
 })
-export class AppModule {}
+export class AppModule { }

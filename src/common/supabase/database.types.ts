@@ -39,6 +39,54 @@ export type Database = {
   }
   public: {
     Tables: {
+      quotes: {
+        Row: {
+          budget: string
+          company: string | null
+          contact_number_1: string
+          contact_number_2: string | null
+          created_at: string
+          description: string
+          email: string
+          first_name: string
+          id: string
+          last_name: string
+          service_type: string
+          status: string
+          updated_at: string
+        }
+        Insert: {
+          budget: string
+          company?: string | null
+          contact_number_1: string
+          contact_number_2?: string | null
+          created_at?: string
+          description: string
+          email: string
+          first_name: string
+          id?: string
+          last_name: string
+          service_type: string
+          status?: string
+          updated_at?: string
+        }
+        Update: {
+          budget?: string
+          company?: string | null
+          contact_number_1?: string
+          contact_number_2?: string | null
+          created_at?: string
+          description?: string
+          email?: string
+          first_name?: string
+          id?: string
+          last_name?: string
+          service_type?: string
+          status?: string
+          updated_at?: string
+        }
+        Relationships: []
+      }
       billing_addresses: {
         Row: {
           city: string

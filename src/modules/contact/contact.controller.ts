@@ -14,6 +14,6 @@ export class ContactController {
   @ApiResponse({ status: 400, description: 'Bad Request' })
   @ApiResponse({ status: 500, description: 'Internal Server Error' })
   create(@Body() createContactDto: CreateContactDto) {
-    return this.contactService.createContactOptimized(createContactDto);
+    return this.contactService.createContact(createContactDto);
   }
 }
