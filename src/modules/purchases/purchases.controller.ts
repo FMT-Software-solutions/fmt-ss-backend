@@ -1,7 +1,7 @@
 import { Controller, Post, Body } from '@nestjs/common';
 import { ApiTags, ApiOperation } from '@nestjs/swagger';
 import { PurchasesService } from './purchases.service';
-import { GeneralPurchaseDto, ConfirmationEmailDto, AppProvisioningDto } from './dto/purchase.dto';
+import { GeneralPurchaseDto, ConfirmationEmailDto, AppProvisioningDto, TrialRequestDto, FreeAccessRequestDto } from './dto/purchase.dto';
 
 @ApiTags('Purchases')
 @Controller()
@@ -12,6 +12,18 @@ export class PurchasesController {
     @ApiOperation({ summary: 'Create a general purchase' })
     processGeneralPurchase(@Body() payload: GeneralPurchaseDto) {
         return this.purchasesService.processGeneralPurchase(payload);
+    }
+
+    @Post('purchases/trial')
+    @ApiOperation({ summary: 'Request a trial access' })
+    processTrialRequest(@Body() payload: TrialRequestDto) {
+        return this.purchasesService.processTrialRequest(payload);
+    }
+
+    @Post('purchases/free-access')
+    @ApiOperation({ summary: 'Request free access for account-required apps' })
+    processFreeAccessRequest(@Body() payload: FreeAccessRequestDto) {
+        return this.purchasesService.processFreeAccessRequest(payload);
     }
 
     @Post('purchases/confirmation-email')

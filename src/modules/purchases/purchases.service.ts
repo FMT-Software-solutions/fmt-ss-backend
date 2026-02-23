@@ -3,7 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { SupabaseService } from '../../common/supabase/supabase.service';
 import { SanityService } from '../../common/sanity/sanity.service';
 import { ResendService } from '../../common/resend/resend.service';
-import { BillingDetailsDto, PurchaseItemDto } from './dto/purchase.dto';
+import { BillingDetailsDto, PurchaseItemDto, TrialRequestDto, FreeAccessRequestDto } from './dto/purchase.dto';
 import { Database } from '../../common/supabase/database.types';
 
 type OrganizationInsert = Database['public']['Tables']['organizations']['Insert'];
@@ -60,7 +60,9 @@ export class PurchasesService {
             name: billingDetails.organizationName,
             email: billingDetails.organizationEmail,
             phone: billingDetails.phoneNumber,
-            address: `${billingDetails.address.street}, ${billingDetails.address.city}, ${billingDetails.address.state}, ${billingDetails.address.country}`
+            address: billingDetails.address
+              ? `${billingDetails.address.street || ''}, ${billingDetails.address.city || ''}, ${billingDetails.address.state || ''}, ${billingDetails.address.country || ''}`
+              : ''
           },
           userDetails: {
             firstName: 'Admin',
@@ -159,32 +161,24 @@ export class PurchasesService {
 
     let organizationId = '';
 
-    if (isExistingOrg) {
-      const { data: existingOrg, error: orgLookupError } = await adminSupabase
-        .from('organizations')
-        .select('id, name, email, phone')
-        .eq('email', billingDetails.organizationEmail)
-        .maybeSingle();
+    // Always try to find the organization first by email
+    const { data: existingOrg, error: orgLookupError } = await adminSupabase
+      .from('organizations')
+      .select('id, name, email, phone')
+      .eq('email', billingDetails.organizationEmail)
+      .maybeSingle();
 
-      if (orgLookupError) {
-        throw new Error(orgLookupError.message);
-      }
+    if (orgLookupError) {
+      throw new Error(orgLookupError.message);
+    }
 
-      if (existingOrg?.id) {
-        organizationId = existingOrg.id;
+    if (existingOrg?.id) {
+      organizationId = existingOrg.id;
+
+      if (isExistingOrg) {
         const updates: Record<string, any> = {};
-
-        if (billingDetails.organizationName !== existingOrg.name) {
-          updates.name = billingDetails.organizationName;
-        }
-
-        if (billingDetails.organizationEmail !== existingOrg.email) {
-          updates.email = billingDetails.organizationEmail;
-        }
-
-        if (billingDetails.phoneNumber && billingDetails.phoneNumber !== existingOrg.phone) {
-          updates.phone = billingDetails.phoneNumber;
-        }
+        if (billingDetails.organizationName !== existingOrg.name) updates.name = billingDetails.organizationName;
+        if (billingDetails.phoneNumber && billingDetails.phoneNumber !== existingOrg.phone) updates.phone = billingDetails.phoneNumber;
 
         if (Object.keys(updates).length > 0) {
           await adminSupabase.from('organizations').update(updates).eq('id', organizationId);
@@ -207,13 +201,28 @@ export class PurchasesService {
         .single();
 
       if (orgCreateError) {
-        throw new Error(orgCreateError.message);
-      }
+        if (orgCreateError.message.includes('unique constraint') || orgCreateError.code === '23505') {
+          // Fallback: If race condition occurred and it was created just now by someone else
+          const { data: retryOrg } = await adminSupabase
+            .from('organizations')
+            .select('id')
+            .eq('email', billingDetails.organizationEmail)
+            .maybeSingle();
 
-      organizationId = newOrg.id;
+          if (retryOrg?.id) {
+            organizationId = retryOrg.id;
+          } else {
+            throw new BadRequestException(`An account with the email ${billingDetails.organizationEmail} already exists. Please sign in or use a different email.`);
+          }
+        } else {
+          throw new Error(orgCreateError.message);
+        }
+      } else {
+        organizationId = newOrg.id;
+      }
     }
 
-    if (organizationId) {
+    if (organizationId && billingDetails.address && billingDetails.address.street && billingDetails.address.city && billingDetails.address.state && billingDetails.address.country) {
       const { data: existingAddresses } = await adminSupabase
         .from('billing_addresses')
         .select('*')
@@ -221,11 +230,11 @@ export class PurchasesService {
 
       const addressExists = existingAddresses?.some(
         (addr: any) =>
-          addr.street === billingDetails.address.street &&
-          addr.city === billingDetails.address.city &&
-          addr.state === billingDetails.address.state &&
-          addr.country === billingDetails.address.country &&
-          addr.postalCode === billingDetails.address.postalCode
+          addr.street === billingDetails.address?.street &&
+          addr.city === billingDetails.address?.city &&
+          addr.state === billingDetails.address?.state &&
+          addr.country === billingDetails.address?.country &&
+          addr.postalCode === billingDetails.address?.postalCode
       );
 
       if (!addressExists) {
@@ -354,6 +363,146 @@ export class PurchasesService {
       };
       return acc;
     }, {});
+  }
+
+  async processTrialRequest(payload: TrialRequestDto) {
+    const { organizationDetails, productId } = payload;
+
+    // 1. Get App details (to check title/price/provisioning)
+    const apps = await this.fetchProvisioningAppsByIds([productId]);
+    if (!apps || apps.length === 0) {
+      throw new BadRequestException('Product not found');
+    }
+    const app = apps[0];
+
+    // 2. Ensure Organization exists
+    const organizationId = await this.ensureOrganizationAndBillingAddress(organizationDetails, false);
+
+    // Check if organization already has access to this app
+    const accessCheckSupabase: any = this.supabaseService.getServiceRoleClient();
+    const { data: existingAccess } = await accessCheckSupabase
+      .from('organization_apps')
+      .select('status')
+      .eq('organization_id', organizationId)
+      .eq('app_id', productId)
+      .maybeSingle();
+
+    if (existingAccess && (existingAccess.status === 'active' || existingAccess.status === 'trial')) {
+      throw new BadRequestException('You already have access (or a trial) for this application.');
+    }
+
+    // 3. Provision App (Trial Mode)
+    // We need to construct appProvisioningDetails in the format provisionApps expects
+    const appProvisioningDetails = {
+      [productId]: {
+        productId,
+        name: app.title,
+        useSameEmailAsAdmin: true,
+        userEmail: organizationDetails.organizationEmail,
+        supabaseUrl: app.appProvisioning?.supabaseUrl,
+        supabaseAnonKey: app.appProvisioning?.supabaseAnonKey,
+        edgeFunctionName: app.appProvisioning?.edgeFunctionName,
+      }
+    };
+
+    // If app doesn't have provisioning config, we can't provision, but maybe we just record the trial?
+    // Assuming all "Premium Apps" have provisioning config if they need it.
+    if (app.appProvisioning) {
+      await this.provisionApps(organizationId, organizationDetails, appProvisioningDetails, 'trial');
+    }
+
+    // Record app access in organization_apps table
+    const adminSupabase: any = this.supabaseService.getServiceRoleClient();
+    const { error: accessError } = await adminSupabase
+      .from('organization_apps')
+      .upsert({
+        organization_id: organizationId,
+        app_id: productId,
+        status: 'trial',
+        plan_type: 'trial',
+        access_granted_at: new Date().toISOString(),
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString()
+      }, { onConflict: 'organization_id, app_id' });
+
+    if (accessError) {
+      console.error(`Failed to record trial access for org ${organizationId} app ${productId}:`, accessError);
+      // We might not want to fail the whole request if provisioning succeeded, but it's important data.
+    }
+
+    return {
+      success: true,
+      message: 'Trial started successfully',
+      organizationId,
+      // purchaseId: purchase.id // No purchase ID anymore
+    };
+  }
+
+  async processFreeAccessRequest(payload: FreeAccessRequestDto) {
+    const { organizationDetails, productId } = payload;
+
+    // 1. Get App details (to check title/price/provisioning)
+    const apps = await this.fetchProvisioningAppsByIds([productId]);
+    if (!apps || apps.length === 0) {
+      throw new BadRequestException('Product not found');
+    }
+    const app = apps[0];
+
+    // 2. Ensure Organization exists (reuses existing if email matches)
+    const organizationId = await this.ensureOrganizationAndBillingAddress(organizationDetails, false);
+
+    // Check if organization already has access to this app
+    const adminSupabase: any = this.supabaseService.getServiceRoleClient();
+    const { data: existingAccess } = await adminSupabase
+      .from('organization_apps')
+      .select('status')
+      .eq('organization_id', organizationId)
+      .eq('app_id', productId)
+      .maybeSingle();
+
+    if (existingAccess && existingAccess.status === 'active') {
+      throw new BadRequestException('You already have access to this application.');
+    }
+
+    // 3. Provision App (Free Mode)
+    const appProvisioningDetails = {
+      [productId]: {
+        productId,
+        name: app.title,
+        useSameEmailAsAdmin: true,
+        userEmail: organizationDetails.organizationEmail,
+        supabaseUrl: app.appProvisioning?.supabaseUrl,
+        supabaseAnonKey: app.appProvisioning?.supabaseAnonKey,
+        edgeFunctionName: app.appProvisioning?.edgeFunctionName,
+      }
+    };
+
+    if (app.appProvisioning) {
+      await this.provisionApps(organizationId, organizationDetails, appProvisioningDetails, 'free');
+    }
+
+    // Record app access
+    const { error: accessError } = await adminSupabase
+      .from('organization_apps')
+      .upsert({
+        organization_id: organizationId,
+        app_id: productId,
+        status: 'active',
+        plan_type: 'free',
+        access_granted_at: new Date().toISOString(),
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString()
+      }, { onConflict: 'organization_id, app_id' });
+
+    if (accessError) {
+      console.error(`Failed to record free access for org ${organizationId} app ${productId}:`, accessError);
+    }
+
+    return {
+      success: true,
+      message: 'Free access granted successfully',
+      organizationId,
+    };
   }
 
   async processGeneralPurchase(payload: {

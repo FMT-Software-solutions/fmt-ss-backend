@@ -3,21 +3,25 @@ import { Type } from 'class-transformer';
 import { ApiProperty } from '@nestjs/swagger';
 
 export class AddressDto {
-  @ApiProperty()
+  @ApiProperty({ required: false })
   @IsString()
-  street: string;
+  @IsOptional()
+  street?: string;
 
-  @ApiProperty()
+  @ApiProperty({ required: false })
   @IsString()
-  city: string;
+  @IsOptional()
+  city?: string;
 
-  @ApiProperty()
+  @ApiProperty({ required: false })
   @IsString()
-  state: string;
+  @IsOptional()
+  state?: string;
 
-  @ApiProperty()
+  @ApiProperty({ required: false })
   @IsString()
-  country: string;
+  @IsOptional()
+  country?: string;
 
   @ApiProperty({ required: false })
   @IsString()
@@ -39,10 +43,11 @@ export class BillingDetailsDto {
   @IsOptional()
   phoneNumber?: string;
 
-  @ApiProperty()
+  @ApiProperty({ required: false })
   @ValidateNested()
   @Type(() => AddressDto)
-  address: AddressDto;
+  @IsOptional()
+  address?: AddressDto;
 }
 
 export class PurchaseItemDto {
@@ -153,4 +158,26 @@ export class AppProvisioningDto {
   @IsOptional()
   @IsString()
   mode?: 'buy' | 'trial' | 'free';
+}
+
+export class TrialRequestDto {
+  @ApiProperty()
+  @ValidateNested()
+  @Type(() => BillingDetailsDto)
+  organizationDetails: BillingDetailsDto;
+
+  @ApiProperty()
+  @IsString()
+  productId: string;
+}
+
+export class FreeAccessRequestDto {
+  @ApiProperty()
+  @ValidateNested()
+  @Type(() => BillingDetailsDto)
+  organizationDetails: BillingDetailsDto;
+
+  @ApiProperty()
+  @IsString()
+  productId: string;
 }

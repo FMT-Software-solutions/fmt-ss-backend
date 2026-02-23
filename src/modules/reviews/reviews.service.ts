@@ -37,4 +37,24 @@ export class ReviewsService {
 
     return data;
   }
+
+  async findAllByApp(appId: string) {
+    const supabase = this.supabaseService.getClient();
+
+    // Use maybeSingle() or check count to debug if needed, but select('*') returns an array
+    const { data, error } = await supabase
+      .from('reviews')
+      .select('*')
+      .eq('app_id', appId)
+      .eq('status', 'approved')
+      .order('created_at', { ascending: false });
+
+    if (error) {
+      console.error(`Error fetching reviews for app ${appId}:`, error);
+      throw new InternalServerErrorException('Failed to fetch reviews');
+    }
+
+    // Explicitly return data or empty array
+    return data || [];
+  }
 }

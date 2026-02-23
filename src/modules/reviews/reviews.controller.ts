@@ -1,4 +1,4 @@
-import { Controller, Post, Get, Body, UseGuards } from '@nestjs/common';
+import { Controller, Post, Get, Body, UseGuards, Param } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
 import { ThrottlerGuard } from '@nestjs/throttler';
 import { ReviewsService } from './reviews.service';
@@ -7,7 +7,7 @@ import { CreateReviewDto } from './dto/create-review.dto';
 @ApiTags('Reviews')
 @Controller('reviews')
 export class ReviewsController {
-  constructor(private readonly reviewsService: ReviewsService) {}
+  constructor(private readonly reviewsService: ReviewsService) { }
 
   @Post()
   @UseGuards(ThrottlerGuard)
@@ -22,5 +22,12 @@ export class ReviewsController {
   @ApiResponse({ status: 200, description: 'List of featured reviews' })
   findAllFeatured() {
     return this.reviewsService.findAllFeatured();
+  }
+
+  @Get('app/:appId')
+  @ApiOperation({ summary: 'Get reviews for an app' })
+  @ApiResponse({ status: 200, description: 'List of reviews for the app' })
+  findAllByApp(@Param('appId') appId: string) {
+    return this.reviewsService.findAllByApp(appId);
   }
 }

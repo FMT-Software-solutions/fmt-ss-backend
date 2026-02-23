@@ -335,6 +335,50 @@ export type Database = {
         }
         Relationships: []
       }
+      organization_apps: {
+        Row: {
+          access_granted_at: string | null
+          app_id: string
+          created_at: string | null
+          expires_at: string | null
+          id: string
+          organization_id: string
+          plan_type: string | null
+          status: string
+          updated_at: string | null
+        }
+        Insert: {
+          access_granted_at?: string | null
+          app_id: string
+          created_at?: string | null
+          expires_at?: string | null
+          id?: string
+          organization_id: string
+          plan_type?: string | null
+          status?: string
+          updated_at?: string | null
+        }
+        Update: {
+          access_granted_at?: string | null
+          app_id?: string
+          created_at?: string | null
+          expires_at?: string | null
+          id?: string
+          organization_id?: string
+          plan_type?: string | null
+          status?: string
+          updated_at?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "organization_apps_organization_id_fkey"
+            columns: ["organization_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       organizations: {
         Row: {
           address: Json | null
