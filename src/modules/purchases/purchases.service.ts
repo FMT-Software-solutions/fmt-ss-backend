@@ -36,11 +36,11 @@ export class PurchasesService {
         <style>
           body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; line-height: 1.6; color: #333; margin: 0; padding: 0; background-color: #f9fafb; }
           .container { max-width: 600px; margin: 0 auto; background-color: #ffffff; border-radius: 8px; overflow: hidden; box-shadow: 0 4px 6px rgba(0,0,0,0.05); margin-top: 40px; margin-bottom: 40px; }
-          .header { background-color: #0f172a; color: #ffffff; padding: 30px; text-align: center; }
+          .header { background-color: #E91E63; color: #ffffff; padding: 30px; text-align: center; }
           .header h1 { margin: 0; font-size: 24px; font-weight: 600; }
           .content { padding: 40px 30px; }
           .footer { background-color: #f1f5f9; padding: 20px; text-align: center; font-size: 12px; color: #64748b; }
-          .button { display: inline-block; background-color: #2563eb; color: #ffffff; padding: 12px 24px; text-decoration: none; border-radius: 6px; font-weight: 600; margin-top: 20px; }
+          .button { display: inline-block; background-color: #E91E63; color: #ffffff; padding: 12px 24px; text-decoration: none; border-radius: 6px; font-weight: 600; margin-top: 20px; }
           .info-box { background-color: #eff6ff; border: 1px solid #dbeafe; border-radius: 6px; padding: 15px; margin: 20px 0; }
           .info-label { font-size: 12px; color: #64748b; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 4px; }
           .info-value { font-size: 16px; font-weight: 500; color: #1e293b; font-family: monospace; }
@@ -239,6 +239,8 @@ export class PurchasesService {
       productId: item.productId,
       quantity: item.quantity,
       price: item.price ?? 0,
+      title: item.title,
+      product: item.product,
       appId: item.productId, // Fallback if no specific logic needed
     }));
   }

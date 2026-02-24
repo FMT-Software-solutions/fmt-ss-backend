@@ -4,6 +4,7 @@ import { SupabaseService } from '../../common/supabase/supabase.service';
 import { PurchasesService } from '../purchases/purchases.service';
 import { IssuesService } from '../issues/issues.service';
 import { HubtelCheckoutRequestDto, HubtelConfigRequestDto, HubtelStatusRequestDto } from './dto/hubtel.dto';
+import { PaystackCheckoutDto, PaystackInitializeDto } from './dto/paystack.dto';
 
 @Injectable()
 export class PaymentsService {
@@ -193,6 +194,222 @@ export class PaymentsService {
         severity: 'medium',
         category: 'notification',
         title: 'Purchase Confirmation Email Failed (Hubtel)',
+        description: `Failed to send purchase confirmation email for ${checkoutPayload.billingDetails.organizationEmail}`,
+        error_message: emailError.message,
+        stack_trace: emailError.stack,
+        organization_id: purchaseRecord.organization_id,
+        purchase_id: purchaseRecord.id,
+      });
+    }
+
+    return { success: true, purchase: purchaseRecord };
+  }
+
+  async handlePaystackInitialize(payload: PaystackInitializeDto) {
+    const { customerPhoneNumber, clientReference } = payload;
+
+    const normalizedPhone = this.normalizePhoneNumber(customerPhoneNumber);
+    if (!normalizedPhone) {
+      throw new BadRequestException('Invalid Ghana phone number');
+    }
+
+    const publicKey = this.configService.get<string>('PAYSTACK_PUBLIC_KEY');
+    if (!publicKey) {
+      throw new InternalServerErrorException('Paystack configuration is missing');
+    }
+
+    return {
+      reference: clientReference,
+      publicKey,
+    };
+  }
+
+  async verifyPaystackTransaction(reference: string) {
+    const secretKey = this.configService.get<string>('PAYSTACK_SECRET_KEY');
+    if (!secretKey) {
+      throw new InternalServerErrorException('Paystack secret key is missing');
+    }
+
+    try {
+      const response = await fetch(`https://api.paystack.co/transaction/verify/${encodeURIComponent(reference)}`, {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${secretKey}`,
+        },
+      });
+
+      if (!response.ok) {
+        throw new Error(`Paystack API returned ${response.status}`);
+      }
+
+      const data = await response.json();
+      return data;
+    } catch (error) {
+      await this.issuesService.logApiError(
+        error instanceof Error ? error.message : 'Paystack verification failed',
+        'paystack_verification',
+        'GET',
+        { reference }
+      );
+      throw new BadRequestException('Payment verification failed');
+    }
+  }
+
+  async handlePaystackCheckout(payload: PaystackCheckoutDto) {
+    const { reference, checkoutPayload } = payload;
+
+    if (!reference || !checkoutPayload?.billingDetails || !checkoutPayload?.items) {
+      await this.issuesService.logIssue({
+        issue_type: 'error',
+        severity: 'low',
+        category: 'payment',
+        title: 'Paystack Checkout Missing Fields',
+        description: 'Missing required fields in Paystack checkout payload',
+        metadata: {
+          reference,
+          hasBillingDetails: !!checkoutPayload?.billingDetails,
+          hasItems: !!checkoutPayload?.items
+        }
+      });
+      throw new BadRequestException('Missing required fields');
+    }
+
+    // Verify transaction
+    const verification = await this.verifyPaystackTransaction(reference);
+
+    if (!verification.status || verification.data.status !== 'success') {
+      await this.issuesService.logIssue({
+        issue_type: 'error',
+        severity: 'medium',
+        category: 'payment',
+        title: 'Paystack Payment Failed',
+        description: `Payment status: ${verification.data.status}`,
+        metadata: {
+          reference,
+          status: verification.data.status,
+          gatewayResponse: verification.data.gateway_response
+        }
+      });
+      throw new BadRequestException(`Payment not completed: ${verification.data.status}`);
+    }
+
+    const supabase: any = this.supabaseService.getServiceRoleClient();
+
+    // Check existing purchase
+    const { data: existingPurchase, error: existingError } = await supabase
+      .from('purchases')
+      .select('*')
+      .eq('client_reference', reference)
+      .maybeSingle();
+
+    if (existingError) {
+      await this.issuesService.logDatabaseError(existingError.message, 'paystack_checkout', 'purchases');
+      throw new InternalServerErrorException('Failed to lookup purchase');
+    }
+
+    let purchaseRecord = existingPurchase;
+
+    if (existingPurchase) {
+      // Update existing
+      if (existingPurchase.status !== 'completed') {
+        const { data: updated, error: updateError } = await supabase
+          .from('purchases')
+          .update({
+            status: 'completed',
+            payment_provider: 'paystack',
+            payment_method: verification.data.channel,
+            external_transaction_id: String(verification.data.id),
+            payment_details: {
+              ...existingPurchase.payment_details,
+              paystackResponse: verification.data,
+              updatedAt: new Date().toISOString()
+            }
+          })
+          .eq('id', existingPurchase.id)
+          .select()
+          .single();
+
+        if (updateError) throw new InternalServerErrorException(updateError.message);
+        purchaseRecord = updated;
+      }
+    } else {
+      // Create new
+      const organizationId = await this.purchasesService.ensureOrganizationAndBillingAddress(
+        checkoutPayload.billingDetails,
+        checkoutPayload.isExistingOrg
+      );
+
+      purchaseRecord = await this.purchasesService.createPurchaseRecord({
+        organizationId,
+        clientReference: reference,
+        amount: checkoutPayload.total,
+        status: 'completed',
+        items: checkoutPayload.items,
+        paymentProvider: 'paystack',
+        paymentMethod: verification.data.channel,
+        externalTransactionId: String(verification.data.id),
+        paymentDetails: {
+          paystackResponse: verification.data,
+        }
+      });
+    }
+
+    if (checkoutPayload.appProvisioningDetails) {
+      await this.purchasesService.provisionApps(
+        purchaseRecord.organization_id,
+        checkoutPayload.billingDetails,
+        checkoutPayload.appProvisioningDetails
+      );
+    }
+
+    // Record app access in organization_apps table
+    const organizationAppsData = checkoutPayload.items.map(item => ({
+      organization_id: purchaseRecord.organization_id,
+      app_id: item.productId,
+      status: 'active',
+      plan_type: 'paid',
+      access_granted_at: new Date().toISOString(),
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString()
+    }));
+
+    if (organizationAppsData.length > 0) {
+      const { error: accessError } = await supabase
+        .from('organization_apps')
+        .upsert(organizationAppsData, { onConflict: 'organization_id, app_id' });
+
+      if (accessError) {
+        console.error(`Failed to record paid access for org ${purchaseRecord.organization_id}:`, accessError);
+        await this.issuesService.logIssue({
+          issue_type: 'error',
+          severity: 'critical',
+          category: 'purchase',
+          title: 'Failed to record paid app access (Paystack)',
+          description: `Failed to insert organization_apps records for purchase ${purchaseRecord.id}`,
+          error_message: accessError.message,
+          organization_id: purchaseRecord.organization_id,
+          purchase_id: purchaseRecord.id,
+          metadata: { items: checkoutPayload.items.map(i => i.productId) }
+        });
+      }
+    }
+
+    try {
+      await this.purchasesService.sendPurchaseConfirmationEmail(
+        {
+          organizationName: checkoutPayload.billingDetails.organizationName,
+          organizationEmail: checkoutPayload.billingDetails.organizationEmail
+        },
+        checkoutPayload.items,
+        checkoutPayload.total
+      );
+    } catch (emailError) {
+      console.error('Failed to send confirmation email (Paystack):', emailError);
+      await this.issuesService.logIssue({
+        issue_type: 'error',
+        severity: 'medium',
+        category: 'notification',
+        title: 'Purchase Confirmation Email Failed (Paystack)',
         description: `Failed to send purchase confirmation email for ${checkoutPayload.billingDetails.organizationEmail}`,
         error_message: emailError.message,
         stack_trace: emailError.stack,

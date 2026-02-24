@@ -3,6 +3,7 @@ import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
 import { ThrottlerGuard } from '@nestjs/throttler';
 import { PaymentsService } from './payments.service';
 import { HubtelCheckoutRequestDto, HubtelConfigRequestDto, HubtelStatusRequestDto } from './dto/hubtel.dto';
+import { PaystackCheckoutDto, PaystackInitializeDto } from './dto/paystack.dto';
 
 @ApiTags('Payments')
 @Controller('payments')
@@ -34,5 +35,20 @@ export class PaymentsController {
     @ApiOperation({ summary: 'Handle Hubtel callback' })
     handleHubtelCallback(@Body() payload: any) {
         return this.paymentsService.handleHubtelCallback(payload);
+    }
+
+    @Post('paystack/config')
+    @ApiOperation({ summary: 'Get Paystack payment configuration' })
+    handlePaystackConfig(@Body() payload: PaystackInitializeDto) {
+        return this.paymentsService.handlePaystackInitialize(payload);
+    }
+
+    @Post('paystack/checkout')
+    @UseGuards(ThrottlerGuard)
+    @ApiOperation({ summary: 'Record Paystack checkout' })
+    @ApiResponse({ status: 201, description: 'Purchase recorded' })
+    @ApiResponse({ status: 400, description: 'Bad Request' })
+    handlePaystackCheckout(@Body() payload: PaystackCheckoutDto) {
+        return this.paymentsService.handlePaystackCheckout(payload);
     }
 }
