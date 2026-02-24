@@ -61,6 +61,12 @@ export class HubtelConfigRequestDto {
   @ApiProperty()
   @IsString()
   clientReference: string;
+
+  @ApiProperty({ required: false })
+  @ValidateNested()
+  @Type(() => HubtelCheckoutPayloadDto)
+  @IsOptional()
+  checkoutPayload?: HubtelCheckoutPayloadDto;
 }
 
 export class HubtelStatusRequestDto {

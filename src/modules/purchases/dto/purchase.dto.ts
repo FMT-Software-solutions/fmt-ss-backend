@@ -41,6 +41,16 @@ export class BillingDetailsDto {
   @ApiProperty({ required: false })
   @IsString()
   @IsOptional()
+  firstName?: string;
+
+  @ApiProperty({ required: false })
+  @IsString()
+  @IsOptional()
+  lastName?: string;
+
+  @ApiProperty({ required: false })
+  @IsString()
+  @IsOptional()
   phoneNumber?: string;
 
   @ApiProperty({ required: false })
@@ -68,6 +78,10 @@ export class PurchaseItemDto {
   @IsString()
   @IsOptional()
   title?: string;
+
+  @ApiProperty({ required: false })
+  @IsOptional()
+  product?: any;
 }
 
 export class ManualPurchaseDto {
@@ -121,6 +135,25 @@ export class GeneralPurchaseDto {
   @ApiProperty()
   @IsString()
   payment_reference: string;
+
+  @ApiProperty({ required: false })
+  @IsOptional()
+  @IsString()
+  status?: string;
+
+  @ApiProperty({ required: false })
+  @IsOptional()
+  paymentDetails?: any;
+
+  @ApiProperty({ required: false })
+  @IsOptional()
+  @IsString()
+  paymentProvider?: string;
+
+  @ApiProperty({ required: false })
+  @IsOptional()
+  @IsString()
+  paymentMethod?: string;
 }
 
 export class ConfirmationEmailDto {

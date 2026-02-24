@@ -45,10 +45,34 @@ export class PaymentsService {
     const normalized = this.normalizeSuccessPayload(paymentResponse);
 
     if (!clientReference || !checkoutPayload?.billingDetails || !checkoutPayload?.items) {
+      await this.issuesService.logIssue({
+        issue_type: 'error',
+        severity: 'low',
+        category: 'payment',
+        title: 'Hubtel Checkout Missing Fields',
+        description: 'Missing required fields in Hubtel checkout payload',
+        metadata: {
+          clientReference,
+          hasBillingDetails: !!checkoutPayload?.billingDetails,
+          hasItems: !!checkoutPayload?.items
+        }
+      });
       throw new BadRequestException('Missing required fields');
     }
 
     if (normalized.status !== 'completed') {
+      await this.issuesService.logIssue({
+        issue_type: 'error',
+        severity: 'medium',
+        category: 'payment',
+        title: 'Hubtel Payment Failed',
+        description: `Payment status: ${normalized.status}`,
+        metadata: {
+          clientReference,
+          responseCode: paymentResponse?.ResponseCode,
+          status: normalized.status
+        }
+      });
       throw new BadRequestException(`Payment not completed: ${normalized.status}`);
     }
 
@@ -113,12 +137,6 @@ export class PaymentsService {
       });
     }
 
-    // Trigger Provisioning & Email if newly completed (or just ensure it runs)
-    // Legacy code seems to rely on client calling endpoints separately? 
-    // But since we are here, we should do it if it hasn't been done.
-    // Check if confirmation email was sent?
-    // Let's just do it.
-
     if (checkoutPayload.appProvisioningDetails) {
       await this.purchasesService.provisionApps(
         purchaseRecord.organization_id,
@@ -127,14 +145,61 @@ export class PaymentsService {
       );
     }
 
-    await this.purchasesService.sendPurchaseConfirmationEmail(
-      {
-        organizationName: checkoutPayload.billingDetails.organizationName,
-        organizationEmail: checkoutPayload.billingDetails.organizationEmail
-      },
-      checkoutPayload.items,
-      checkoutPayload.total
-    );
+    // Record app access in organization_apps table
+    const organizationAppsData = checkoutPayload.items.map(item => ({
+      organization_id: purchaseRecord.organization_id,
+      app_id: item.productId,
+      status: 'active',
+      plan_type: 'paid',
+      access_granted_at: new Date().toISOString(),
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString()
+    }));
+
+    if (organizationAppsData.length > 0) {
+      const { error: accessError } = await supabase
+        .from('organization_apps')
+        .upsert(organizationAppsData, { onConflict: 'organization_id, app_id' });
+
+      if (accessError) {
+        console.error(`Failed to record paid access for org ${purchaseRecord.organization_id}:`, accessError);
+        await this.issuesService.logIssue({
+          issue_type: 'error',
+          severity: 'critical',
+          category: 'purchase',
+          title: 'Failed to record paid app access (Hubtel)',
+          description: `Failed to insert organization_apps records for purchase ${purchaseRecord.id}`,
+          error_message: accessError.message,
+          organization_id: purchaseRecord.organization_id,
+          purchase_id: purchaseRecord.id,
+          metadata: { items: checkoutPayload.items.map(i => i.productId) }
+        });
+      }
+    }
+
+    try {
+      await this.purchasesService.sendPurchaseConfirmationEmail(
+        {
+          organizationName: checkoutPayload.billingDetails.organizationName,
+          organizationEmail: checkoutPayload.billingDetails.organizationEmail
+        },
+        checkoutPayload.items,
+        checkoutPayload.total
+      );
+    } catch (emailError) {
+      console.error('Failed to send confirmation email (Hubtel):', emailError);
+      await this.issuesService.logIssue({
+        issue_type: 'error',
+        severity: 'medium',
+        category: 'notification',
+        title: 'Purchase Confirmation Email Failed (Hubtel)',
+        description: `Failed to send purchase confirmation email for ${checkoutPayload.billingDetails.organizationEmail}`,
+        error_message: emailError.message,
+        stack_trace: emailError.stack,
+        organization_id: purchaseRecord.organization_id,
+        purchase_id: purchaseRecord.id,
+      });
+    }
 
     return { success: true, purchase: purchaseRecord };
   }
@@ -190,7 +255,7 @@ export class PaymentsService {
 
     if (existingPurchase.status !== 'completed' && newStatus === 'completed') {
       // Mark as completed
-      const { data: updated } = await supabase
+      const { data: updated, error: updateError } = await supabase
         .from('purchases')
         .update({
           status: 'completed',
@@ -204,22 +269,45 @@ export class PaymentsService {
         .select()
         .single();
 
-      // Trigger Provisioning (Need to fetch provisioning details from Sanity/DB or stored in purchase?)
-      // Legacy code: `triggerAppProvisioning` uses `appProvisioningDetails` from... where?
-      // In legacy `checkout`, it passed `appProvisioningDetails`.
-      // In legacy `callback`, it logic is truncated in my view? 
-      // Wait, legacy `checkout` route calls `triggerAppProvisioning` if status is completed.
-      // Legacy `callback` route probably does the same.
-      // But `appProvisioningDetails` are NOT stored in `purchases` table usually.
-      // Unless they are in `items` or `payment_details`.
-      // I will assume for now we just update status. 
-      // If provisioning details are needed, they should have been stored or re-fetched.
-      // Actually, `items` has `appId`. I can fetch provisioning details from Sanity using `items`.
-      // But I don't have user email/password preference stored.
-      // This is a limitation of the legacy design if it relies on client payload in checkout.
-      // However, usually `checkout` is called AFTER successful payment on client, so it handles provisioning.
-      // `callback` is a backup or for server-to-server.
-      // I will just update status for now to avoid complexity without full legacy context on callback provisioning flow.
+      if (updateError) {
+        await this.issuesService.logDatabaseError(updateError.message, 'hubtel_callback_update', 'purchases');
+        return { success: false, error: 'Failed to update purchase status' };
+      }
+
+      // Record app access in organization_apps table
+      const items = existingPurchase.items as any[];
+      if (items && Array.isArray(items)) {
+        const organizationAppsData = items.map(item => ({
+          organization_id: existingPurchase.organization_id,
+          app_id: item.productId || item.appId,
+          status: 'active',
+          plan_type: 'paid',
+          access_granted_at: new Date().toISOString(),
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString()
+        }));
+
+        if (organizationAppsData.length > 0) {
+          const { error: accessError } = await supabase
+            .from('organization_apps')
+            .upsert(organizationAppsData, { onConflict: 'organization_id, app_id' });
+
+          if (accessError) {
+            console.error(`Failed to record paid access for org ${existingPurchase.organization_id} via callback:`, accessError);
+            await this.issuesService.logIssue({
+              issue_type: 'error',
+              severity: 'critical',
+              category: 'purchase',
+              title: 'Failed to record paid app access (Hubtel Callback)',
+              description: `Failed to insert organization_apps records for purchase ${existingPurchase.id}`,
+              error_message: accessError.message,
+              organization_id: existingPurchase.organization_id,
+              purchase_id: existingPurchase.id,
+              metadata: { items: items.map(i => i.productId || i.appId) }
+            });
+          }
+        }
+      }
     }
 
     return { success: true };

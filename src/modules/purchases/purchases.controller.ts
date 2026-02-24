@@ -1,5 +1,5 @@
-import { Controller, Post, Body } from '@nestjs/common';
-import { ApiTags, ApiOperation } from '@nestjs/swagger';
+import { Controller, Post, Body, Get, Query } from '@nestjs/common';
+import { ApiTags, ApiOperation, ApiQuery } from '@nestjs/swagger';
 import { PurchasesService } from './purchases.service';
 import { GeneralPurchaseDto, ConfirmationEmailDto, AppProvisioningDto, TrialRequestDto, FreeAccessRequestDto } from './dto/purchase.dto';
 
@@ -7,6 +7,14 @@ import { GeneralPurchaseDto, ConfirmationEmailDto, AppProvisioningDto, TrialRequ
 @Controller()
 export class PurchasesController {
     constructor(private readonly purchasesService: PurchasesService) { }
+
+    @Get('purchases/check-access')
+    @ApiOperation({ summary: 'Check if email has access to app' })
+    @ApiQuery({ name: 'email', required: true })
+    @ApiQuery({ name: 'productId', required: true })
+    checkAppAccess(@Query('email') email: string, @Query('productId') productId: string) {
+        return this.purchasesService.checkAppAccess(email, productId);
+    }
 
     @Post('purchases')
     @ApiOperation({ summary: 'Create a general purchase' })

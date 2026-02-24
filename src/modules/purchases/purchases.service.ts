@@ -1,9 +1,10 @@
 import { Injectable, InternalServerErrorException, BadRequestException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { SupabaseService } from '../../common/supabase/supabase.service';
+import { IssuesService } from '../issues/issues.service';
 import { SanityService } from '../../common/sanity/sanity.service';
 import { ResendService } from '../../common/resend/resend.service';
-import { BillingDetailsDto, PurchaseItemDto, TrialRequestDto, FreeAccessRequestDto } from './dto/purchase.dto';
+import { BillingDetailsDto, PurchaseItemDto, TrialRequestDto, FreeAccessRequestDto, GeneralPurchaseDto } from './dto/purchase.dto';
 import { Database } from '../../common/supabase/database.types';
 
 type OrganizationInsert = Database['public']['Tables']['organizations']['Insert'];
@@ -20,10 +21,48 @@ export interface ProvisioningAppDetail {
 export class PurchasesService {
   constructor(
     private readonly supabaseService: SupabaseService,
+    private readonly configService: ConfigService,
     private readonly sanityService: SanityService,
     private readonly resendService: ResendService,
-    private readonly configService: ConfigService,
+    private readonly issuesService: IssuesService,
   ) { }
+
+  private generateEmailTemplate(title: string, content: string) {
+    return `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="utf-8">
+        <style>
+          body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; line-height: 1.6; color: #333; margin: 0; padding: 0; background-color: #f9fafb; }
+          .container { max-width: 600px; margin: 0 auto; background-color: #ffffff; border-radius: 8px; overflow: hidden; box-shadow: 0 4px 6px rgba(0,0,0,0.05); margin-top: 40px; margin-bottom: 40px; }
+          .header { background-color: #0f172a; color: #ffffff; padding: 30px; text-align: center; }
+          .header h1 { margin: 0; font-size: 24px; font-weight: 600; }
+          .content { padding: 40px 30px; }
+          .footer { background-color: #f1f5f9; padding: 20px; text-align: center; font-size: 12px; color: #64748b; }
+          .button { display: inline-block; background-color: #2563eb; color: #ffffff; padding: 12px 24px; text-decoration: none; border-radius: 6px; font-weight: 600; margin-top: 20px; }
+          .info-box { background-color: #eff6ff; border: 1px solid #dbeafe; border-radius: 6px; padding: 15px; margin: 20px 0; }
+          .info-label { font-size: 12px; color: #64748b; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 4px; }
+          .info-value { font-size: 16px; font-weight: 500; color: #1e293b; font-family: monospace; }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <div class="header">
+            <h1>${title}</h1>
+          </div>
+          <div class="content">
+            ${content}
+          </div>
+          <div class="footer">
+            <p>&copy; ${new Date().getFullYear()} FMT Software Solutions. All rights reserved.</p>
+            <p>Accra, Ghana</p>
+          </div>
+        </div>
+      </body>
+      </html>
+    `;
+  }
 
   private generateTemporalPassword() {
     const length = 8;
@@ -44,11 +83,18 @@ export class PurchasesService {
     appProvisioningDetails: Record<string, any>,
     mode: 'buy' | 'trial' | 'free' = 'buy'
   ) {
+
     const results = [];
     const provisioningSecret = this.configService.get<string>('PROVISIONING_SECRET');
 
     for (const [productId, appDetails] of Object.entries(appProvisioningDetails)) {
       try {
+        if (!appDetails.supabaseUrl || !appDetails.edgeFunctionName || !appDetails.supabaseAnonKey) {
+          console.warn(`Missing provisioning config for app ${productId}`);
+          results.push({ productId, success: false, error: 'Missing provisioning configuration' });
+          continue;
+        }
+
         const userPassword = this.generateTemporalPassword();
         const userEmail = appDetails.useSameEmailAsAdmin || (!appDetails.useSameEmailAsAdmin && !appDetails.userEmail)
           ? billingDetails.organizationEmail
@@ -89,6 +135,18 @@ export class PurchasesService {
         if (!response.ok) {
           const text = await response.text();
           console.error(`Edge function failed for ${productId}: ${response.status} ${text}`);
+          await this.logPurchaseIssue({
+            title: `Provisioning Edge Function Failed: ${appDetails.name}`,
+            description: `Edge function returned status ${response.status}`,
+            errorMessage: text,
+            organizationId,
+            severity: 'high',
+            metadata: {
+              productId,
+              edgeFunction: appDetails.edgeFunctionName,
+              statusCode: response.status
+            }
+          });
           results.push({ productId, success: false, error: `Edge function failed: ${response.status}` });
           continue;
         }
@@ -104,20 +162,39 @@ export class PurchasesService {
           from: 'FMT Software Solutions <provisioning@fmtsoftware.com>',
           to: billingDetails.organizationEmail,
           subject,
-          html: `
-            <h1>${subject}</h1>
-            <p>Hello ${billingDetails.organizationName},</p>
-            <p>Your access to <strong>${appDetails.name}</strong> has been provisioned.</p>
-            <p><strong>Login Email:</strong> ${userEmail}</p>
-            <p><strong>Temporary Password:</strong> ${userPassword}</p>
-            <p>Please log in and change your password immediately.</p>
-          `,
+          html: this.generateEmailTemplate(subject, `
+            <p>Hello <strong>${billingDetails.organizationName}</strong>,</p>
+            <p>Your access to <strong>${appDetails.name}</strong> has been provisioned successfully.</p>
+            
+            <div class="info-box">
+              <div class="info-label">Login Email</div>
+              <div class="info-value">${userEmail}</div>
+            </div>
+            
+            <div class="info-box">
+              <div class="info-label">Temporary Password</div>
+              <div class="info-value">${userPassword}</div>
+            </div>
+            
+            <p>Please log in and change your password immediately to secure your account.</p>
+            
+            <a href="https://fmtsoftware.com/login" class="button">Log In Now</a>
+          `),
         });
 
         results.push({ productId, success: true });
 
       } catch (error) {
         console.error(`Provisioning error for ${productId}:`, error);
+        await this.logPurchaseIssue({
+          title: `Provisioning Error: ${appDetails.name}`,
+          description: `Exception during provisioning for ${appDetails.name}`,
+          errorMessage: error.message,
+          stackTrace: error.stack,
+          organizationId,
+          severity: 'high',
+          metadata: { productId }
+        });
         results.push({ productId, success: false, error: error.message });
       }
     }
@@ -133,14 +210,27 @@ export class PurchasesService {
       from: 'FMT Software Solutions <purchase@fmtsoftware.com>',
       to: organizationDetails.organizationEmail,
       subject: 'Purchase Confirmation - FMT Software Solutions',
-      html: `
-          <h1>Purchase Confirmation</h1>
-          <p>Thank you for your purchase, ${organizationDetails.organizationName}!</p>
-          <p><strong>Total:</strong> ${total}</p>
-          <ul>
-            ${items.map(item => `<li>${item.title || item.productId} (x${item.quantity}) - ${item.price}</li>`).join('')}
+      html: this.generateEmailTemplate('Purchase Confirmation', `
+          <p>Thank you for your purchase, <strong>${organizationDetails.organizationName}</strong>!</p>
+          <p>We have received your payment and your order is being processed.</p>
+          
+          <div class="info-box">
+            <div class="info-label">Total Amount</div>
+            <div class="info-value">GHS ${total.toFixed(2)}</div>
+          </div>
+          
+          <h3>Order Details</h3>
+          <ul style="list-style: none; padding: 0;">
+            ${items.map(item => `
+              <li style="border-bottom: 1px solid #e2e8f0; padding: 10px 0;">
+                <span style="font-weight: 500;">${item.title || item.productId}</span> 
+                <span style="color: #64748b; float: right;">x${item.quantity} - GHS ${(item.price || 0).toFixed(2)}</span>
+              </li>
+            `).join('')}
           </ul>
-        `,
+          
+          <p style="margin-top: 20px;">If you have any questions, please reply to this email.</p>
+      `),
     });
   }
 
@@ -427,6 +517,14 @@ export class PurchasesService {
 
     if (accessError) {
       console.error(`Failed to record trial access for org ${organizationId} app ${productId}:`, accessError);
+      await this.logPurchaseIssue({
+        title: 'Failed to record trial app access',
+        description: `Failed to insert organization_apps record for trial`,
+        errorMessage: accessError.message,
+        organizationId,
+        severity: 'medium',
+        metadata: { productId }
+      });
       // We might not want to fail the whole request if provisioning succeeded, but it's important data.
     }
 
@@ -496,6 +594,14 @@ export class PurchasesService {
 
     if (accessError) {
       console.error(`Failed to record free access for org ${organizationId} app ${productId}:`, accessError);
+      await this.logPurchaseIssue({
+        title: 'Failed to record free app access',
+        description: `Failed to insert organization_apps record for free access`,
+        errorMessage: accessError.message,
+        organizationId,
+        severity: 'medium',
+        metadata: { productId }
+      });
     }
 
     return {
@@ -505,13 +611,35 @@ export class PurchasesService {
     };
   }
 
-  async processGeneralPurchase(payload: {
-    organizationDetails: BillingDetailsDto;
-    items: PurchaseItemDto[];
-    total: number;
-    payment_reference: string;
+  async logPurchaseIssue(params: {
+    title: string;
+    description: string;
+    errorMessage?: string;
+    stackTrace?: string;
+    organizationId?: string;
+    purchaseId?: string;
+    severity?: 'low' | 'medium' | 'high' | 'critical';
+    metadata?: any;
+    component?: string;
   }) {
-    const { organizationDetails, items, total, payment_reference } = payload;
+    return this.issuesService.logIssue({
+      issue_type: 'error',
+      severity: params.severity || 'high',
+      category: 'purchase',
+      title: params.title,
+      description: params.description,
+      error_message: params.errorMessage,
+      stack_trace: params.stackTrace,
+      organization_id: params.organizationId,
+      purchase_id: params.purchaseId,
+      component: params.component || 'PurchasesService',
+      metadata: params.metadata,
+      user_action: 'purchase_process',
+    });
+  }
+
+  async processGeneralPurchase(payload: GeneralPurchaseDto) {
+    const { organizationDetails, items, total, payment_reference, status, paymentProvider, paymentMethod, paymentDetails } = payload;
     const adminSupabase: any = this.supabaseService.getServiceRoleClient();
 
     const organizationId = await this.ensureOrganizationAndBillingAddress(organizationDetails, false);
@@ -520,11 +648,42 @@ export class PurchasesService {
       organizationId,
       clientReference: payment_reference,
       amount: total,
-      status: 'completed',
+      status: status || 'completed',
       items,
-      paymentProvider: 'manual',
-      paymentMethod: 'manual',
+      paymentProvider: paymentProvider || 'manual',
+      paymentMethod: paymentMethod || 'manual',
+      paymentDetails: paymentDetails,
     });
+
+    // Record app access in organization_apps table for each purchased item
+    if (items && items.length > 0) {
+      const organizationAppsData = items.map(item => ({
+        organization_id: organizationId,
+        app_id: item.productId,
+        status: 'active',
+        plan_type: 'paid',
+        access_granted_at: new Date().toISOString(),
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString()
+      }));
+
+      const { error: accessError } = await adminSupabase
+        .from('organization_apps')
+        .upsert(organizationAppsData, { onConflict: 'organization_id, app_id' });
+
+      if (accessError) {
+        console.error(`Failed to record paid access for org ${organizationId}:`, accessError);
+        await this.logPurchaseIssue({
+          title: 'Failed to record paid app access',
+          description: `Failed to insert organization_apps records for purchase ${purchase.id}`,
+          errorMessage: accessError.message,
+          organizationId,
+          purchaseId: purchase.id,
+          severity: 'critical',
+          metadata: { items: items.map(i => i.productId) }
+        });
+      }
+    }
 
     const temporaryPassword = this.generateTemporalPassword();
     const { error: userError } = await adminSupabase.auth.admin.createUser({
@@ -534,33 +693,75 @@ export class PurchasesService {
     });
 
     if (userError) {
+      // If user exists, that's fine, we just skip creation.
+      // But if it's another error, we should log it.
       if (!userError.message.includes('already registered')) {
-        throw new BadRequestException(`Error creating user account: ${userError.message}`);
+        console.error('Failed to create user account:', userError);
+        await this.logPurchaseIssue({
+          title: 'Failed to create user account',
+          description: `Failed to create auth user for ${organizationDetails.organizationEmail}`,
+          errorMessage: userError.message,
+          organizationId,
+          purchaseId: purchase.id,
+          severity: 'high',
+        });
       }
     }
 
+    // Provision apps
+    // 1. Get provisioning config for all purchased apps
+    const productIds = items?.map(i => i.productId) || [];
+    const apps = await this.fetchProvisioningAppsByIds(productIds);
+
+    // 2. Construct provisioning details
+    const appProvisioningDetails: Record<string, any> = {};
+    apps.forEach(app => {
+      if (app.appProvisioning) {
+        appProvisioningDetails[app._id] = {
+          productId: app._id,
+          name: app.title,
+          useSameEmailAsAdmin: true,
+          userEmail: organizationDetails.organizationEmail,
+          supabaseUrl: app.appProvisioning.supabaseUrl,
+          supabaseAnonKey: app.appProvisioning.supabaseAnonKey,
+          edgeFunctionName: app.appProvisioning.edgeFunctionName,
+        };
+      }
+    });
+
+    // 3. Call provisionApps if there are apps to provision
+    if (Object.keys(appProvisioningDetails).length > 0) {
+      await this.provisionApps(organizationId, organizationDetails, appProvisioningDetails, 'buy');
+    }
+
+    // Send confirmation email
     try {
       await this.sendPurchaseConfirmationEmail(
         {
           organizationName: organizationDetails.organizationName,
           organizationEmail: organizationDetails.organizationEmail
         },
-        items,
+        items || [],
         total
       );
     } catch (emailError) {
-      console.error('Error sending confirmation email:', emailError);
+      console.error('Failed to send confirmation email:', emailError);
+      await this.logPurchaseIssue({
+        title: 'Failed to send confirmation email',
+        description: `Failed to send purchase confirmation email to ${organizationDetails.organizationEmail}`,
+        errorMessage: emailError.message,
+        stackTrace: emailError.stack,
+        organizationId,
+        purchaseId: purchase.id,
+        severity: 'medium',
+      });
     }
 
     return {
-      id: purchase.id,
-      organization_id: organizationId,
-      productId: items[0]?.productId,
-      purchaseDate: new Date().toISOString(),
-      amount: total,
-      status: 'completed',
-      temporaryPassword,
-      organizationDetails,
+      success: true,
+      message: 'Purchase processed successfully',
+      purchaseId: purchase.id,
+      organizationId,
     };
   }
 
@@ -609,5 +810,43 @@ export class PurchasesService {
         failed: failed.length
       }
     };
+  }
+
+  async checkAppAccess(email: string, productId: string) {
+    if (!email || !productId) {
+      throw new BadRequestException('Email and Product ID are required');
+    }
+
+    const adminSupabase: any = this.supabaseService.getServiceRoleClient();
+
+    // 1. Find organization by email
+    const { data: organization, error: orgError } = await adminSupabase
+      .from('organizations')
+      .select('id')
+      .eq('email', email)
+      .maybeSingle();
+
+    if (orgError) {
+      throw new InternalServerErrorException(`Error finding organization: ${orgError.message}`);
+    }
+
+    if (!organization) {
+      return { hasAccess: false };
+    }
+
+    // 2. Check organization_apps table
+    const { data: access, error: accessError } = await adminSupabase
+      .from('organization_apps')
+      .select('id, status')
+      .eq('organization_id', organization.id)
+      .eq('app_id', productId)
+      .maybeSingle();
+
+    if (accessError) {
+      throw new InternalServerErrorException(`Error checking access: ${accessError.message}`);
+    }
+
+    const hasAccess = !!access && (access.status === 'active' || access.status === 'trial');
+    return { hasAccess };
   }
 }
