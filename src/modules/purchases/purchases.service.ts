@@ -119,6 +119,7 @@ export class PurchasesService {
           productId,
           appName: appDetails.name,
           provisioningSecret,
+          isPurchase: mode === 'buy',
         };
 
         // Call Edge Function
@@ -132,13 +133,14 @@ export class PurchasesService {
           body: JSON.stringify(provisioningData)
         });
 
+        const responseData = await response.json();
+
         if (!response.ok) {
-          const text = await response.text();
-          console.error(`Edge function failed for ${productId}: ${response.status} ${text}`);
+          console.error(`Edge function failed for ${productId}: ${response.status}`, responseData);
           await this.logPurchaseIssue({
             title: `Provisioning Edge Function Failed: ${appDetails.name}`,
             description: `Edge function returned status ${response.status}`,
-            errorMessage: text,
+            errorMessage: JSON.stringify(responseData),
             organizationId,
             severity: 'high',
             metadata: {
@@ -148,6 +150,18 @@ export class PurchasesService {
             }
           });
           results.push({ productId, success: false, error: `Edge function failed: ${response.status}` });
+          continue;
+        }
+
+        // Check if this was an upgrade or existing account
+        // The edge function returns a specific message if it upgraded or found an existing org
+        const isUpgradeOrExisting = responseData.message === 'Organization upgraded to purchased status' ||
+          responseData.message === 'Organization already purchased' ||
+          responseData.message === 'Organization already exists';
+
+        if (isUpgradeOrExisting) {
+          // Skip sending credential email for upgrades/existing accounts
+          results.push({ productId, success: true, message: 'Access updated' });
           continue;
         }
 
@@ -814,7 +828,7 @@ export class PurchasesService {
     };
   }
 
-  async checkAppAccess(email: string, productId: string) {
+  async checkAppAccess(email: string, productId: string, mode?: 'buy' | 'trial') {
     if (!email || !productId) {
       throw new BadRequestException('Email and Product ID are required');
     }
@@ -848,6 +862,14 @@ export class PurchasesService {
       throw new InternalServerErrorException(`Error checking access: ${accessError.message}`);
     }
 
+    // If mode is 'buy', we only block if they have 'active' (paid) access.
+    // If they have 'trial', we allow it (so they can upgrade).
+    if (mode === 'buy') {
+      const hasPaidAccess = !!access && access.status === 'active';
+      return { hasAccess: hasPaidAccess };
+    }
+
+    // Default behavior (or trial mode): block if ANY access exists
     const hasAccess = !!access && (access.status === 'active' || access.status === 'trial');
     return { hasAccess };
   }

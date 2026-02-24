@@ -12,8 +12,9 @@ export class PurchasesController {
     @ApiOperation({ summary: 'Check if email has access to app' })
     @ApiQuery({ name: 'email', required: true })
     @ApiQuery({ name: 'productId', required: true })
-    checkAppAccess(@Query('email') email: string, @Query('productId') productId: string) {
-        return this.purchasesService.checkAppAccess(email, productId);
+    @ApiQuery({ name: 'mode', required: false })
+    checkAppAccess(@Query('email') email: string, @Query('productId') productId: string, @Query('mode') mode?: 'buy' | 'trial') {
+        return this.purchasesService.checkAppAccess(email, productId, mode);
     }
 
     @Post('purchases')
