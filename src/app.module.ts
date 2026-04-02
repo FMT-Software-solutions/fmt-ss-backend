@@ -17,6 +17,7 @@ import { FilesModule } from './modules/files/files.module';
 import { TestimonialsModule } from './modules/testimonials/testimonials.module';
 import { ReviewsModule } from './modules/reviews/reviews.module';
 import { QuotesModule } from './modules/quotes/quotes.module';
+import { SmsModule } from './modules/sms/sms.module';
 
 @Module({
   imports: [
@@ -41,6 +42,7 @@ import { QuotesModule } from './modules/quotes/quotes.module';
     TestimonialsModule,
     ReviewsModule,
     QuotesModule,
+    SmsModule,
   ],
   controllers: [AppController],
   providers: [AppService],
