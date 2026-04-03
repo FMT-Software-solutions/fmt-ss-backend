@@ -69,7 +69,7 @@ export class ArkeselService {
 
   async sendTemplateSms(sender: string, message: string, recipients: Record<string, Record<string, string>>, sandbox?: boolean, callbackUrl?: string) {
     const payload: any = { sender, message, recipients };
-    if (sandbox !== undefined) payload.sandbox = sandbox;
+    // Template API does not support sandbox, DO NOT attach sandbox to payload
     if (callbackUrl) payload.callback_url = callbackUrl;
 
     const data = await this.fetchApi('/sms/template/send', 'POST', payload);
@@ -79,7 +79,7 @@ export class ArkeselService {
 
   async scheduleTemplateSms(sender: string, message: string, recipients: Record<string, Record<string, string>>, scheduledDate: string, sandbox?: boolean) {
     const payload: any = { sender, message, recipients, scheduled_date: scheduledDate };
-    if (sandbox !== undefined) payload.sandbox = sandbox;
+    // Template API does not support sandbox, DO NOT attach sandbox to payload
 
     const data = await this.fetchApi('/sms/template/send', 'POST', payload);
     this.logger.log(`Successfully scheduled Template SMS via Arkesel for ${Object.keys(recipients).length} recipients.`);

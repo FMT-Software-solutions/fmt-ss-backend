@@ -73,16 +73,35 @@ export class SmsService {
     }
 
     if (hasVariables) {
+      // Extract all expected variables from the message string (e.g., {first_name} -> first_name)
+      const expectedVariables = [...dto.message.matchAll(/\{([^}]+)\}/g)].map(match => match[1]);
+
       // 1. Convert message variables from {var} to <%var%> for Arkesel
       const parsedMessage = dto.message.replace(/\{([^}]+)\}/g, '<%$1%>');
 
       // 2. Format recipients to a single object dictionary for Arkesel Template API
-      // Dynamically attach all properties sent from the frontend to Arkesel
       const arkeselTemplateRecipients = validRecipients.reduce((acc, recipient) => {
         const { phone, ...otherFields } = recipient;
-        acc[phone!] = { ...otherFields };
+
+        // Ensure all expected variables exist on the recipient to prevent Arkesel validation errors
+        const safeVariables: Record<string, string> = {};
+        expectedVariables.forEach(variable => {
+          // If the variable is phone, grab it directly from recipient since we destructured it out of otherFields
+          if (variable === 'phone') {
+            safeVariables[variable] = phone as string;
+            return;
+          }
+
+          // Cast otherFields to any to bypass TS indexing error since otherFields type is inferred as unknown
+          const value = (otherFields as any)[variable];
+          safeVariables[variable] = (value !== undefined && value !== null) ? String(value) : '';
+        });
+
+        acc[phone!] = safeVariables;
         return acc;
       }, {} as Record<string, Record<string, string>>);
+
+      console.log(arkeselTemplateRecipients);
 
       if (dto.scheduledDate) {
         return this.arkeselService.scheduleTemplateSms(dto.sender, parsedMessage, arkeselTemplateRecipients, dto.scheduledDate, dto.sandbox);
