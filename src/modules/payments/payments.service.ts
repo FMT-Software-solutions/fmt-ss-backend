@@ -1,4 +1,4 @@
-import { Injectable, BadRequestException, InternalServerErrorException } from '@nestjs/common';
+import { Injectable, BadRequestException, InternalServerErrorException, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { SupabaseService } from '../../common/supabase/supabase.service';
 import { AppsService } from '../apps/apps.service';
@@ -11,6 +11,8 @@ import { InitializeSmsPurchaseDto } from './dto/initialize-sms-purchase.dto';
 
 @Injectable()
 export class PaymentsService {
+  private readonly logger = new Logger(PaymentsService.name);
+
   constructor(
     private readonly supabaseService: SupabaseService,
     private readonly appsService: AppsService,
@@ -683,15 +685,18 @@ export class PaymentsService {
   }
 
   async verifySmsPurchase(dto: VerifySmsPurchaseDto) {
+    this.logger.log(`Starting SMS purchase verification for reference: ${dto.reference}, appId: ${dto.appId}, orgId: ${dto.organizationId}`);
     const { organizationId, userId, reference, amountGhs, creditsPurchased, appId } = dto;
     const paystackSecret = this.configService.get<string>('PAYSTACK_SECRET_KEY');
 
     if (!paystackSecret) {
+      this.logger.error('Paystack secret key is missing in environment variables');
       throw new InternalServerErrorException('Paystack secret key is missing');
     }
 
     try {
       // 1. Verify the transaction with Paystack
+      this.logger.log(`Verifying transaction with Paystack...`);
       const verifyResponse = await fetch(`https://api.paystack.co/transaction/verify/${reference}`, {
         headers: {
           Authorization: `Bearer ${paystackSecret}`,
@@ -701,30 +706,42 @@ export class PaymentsService {
       const verifyData = await verifyResponse.json();
 
       if (!verifyResponse.ok || !verifyData.status || verifyData.data.status !== 'success') {
+        this.logger.error(`Paystack verification failed. Status: ${verifyData.status}, Data status: ${verifyData.data?.status}`);
         throw new BadRequestException('Payment verification failed');
       }
+
+      this.logger.log(`Paystack verification successful.`);
 
       // Check if amount matches (Paystack returns amount in pesewas)
       const paystackAmountGhs = verifyData.data.amount / 100;
       if (paystackAmountGhs !== amountGhs) {
+        this.logger.error(`Payment amount mismatch. Expected: ${amountGhs}, Actual: ${paystackAmountGhs}`);
         throw new BadRequestException('Payment amount mismatch');
       }
 
       // Get the app-specific Supabase client
+      this.logger.log(`Retrieving Supabase client for appId: ${appId}`);
       const supabase = this.appsService.getSupabaseClient(appId);
 
       // 2. Check if we already processed this reference
-      const { data: existingRecord } = await supabase
+      this.logger.log(`Checking for existing payment record with reference: ${reference}`);
+      const { data: existingRecord, error: checkExistingError } = await supabase
         .from('payment_records')
         .select('id')
         .eq('gateway_reference', reference)
         .maybeSingle();
 
+      if (checkExistingError) {
+        this.logger.error(`Error checking existing payment record: ${checkExistingError.message}`, checkExistingError);
+      }
+
       if (existingRecord) {
+        this.logger.log(`Payment already processed. Existing record ID: ${existingRecord.id}`);
         return { success: true, message: 'Payment already processed' };
       }
 
       // 3. Create the payment record
+      this.logger.log(`Inserting new payment record...`);
       const { error: paymentError } = await supabase
         .from('payment_records')
         .insert({
@@ -737,17 +754,24 @@ export class PaymentsService {
         });
 
       if (paymentError) {
+        this.logger.error(`Failed to insert payment record: ${paymentError.message}`, paymentError);
         throw new InternalServerErrorException('Failed to record payment');
       }
 
       // 4. Update the organization's SMS balance
-      const { data: currentBalance } = await supabase
+      this.logger.log(`Retrieving current SMS balance for orgId: ${organizationId}`);
+      const { data: currentBalance, error: getBalanceError } = await supabase
         .from('organization_sms_balances')
         .select('credit_balance')
         .eq('organization_id', organizationId)
         .single();
 
+      if (getBalanceError && getBalanceError.code !== 'PGRST116') { // PGRST116 is "No rows found"
+        this.logger.error(`Failed to retrieve current SMS balance: ${getBalanceError.message}`, getBalanceError);
+      }
+
       const newBalance = (currentBalance?.credit_balance || 0) + creditsPurchased;
+      this.logger.log(`Updating SMS balance to: ${newBalance}`);
 
       const { error: balanceError } = await supabase
         .from('organization_sms_balances')
@@ -758,11 +782,13 @@ export class PaymentsService {
         });
 
       if (balanceError) {
+        this.logger.error(`Failed to update SMS balance: ${balanceError.message}`, balanceError);
         throw new InternalServerErrorException('Failed to update SMS balance');
       }
 
       // 5. Create the transaction ledger entry
-      await supabase
+      this.logger.log(`Inserting sms_credit_transactions ledger entry...`);
+      const { error: txError } = await supabase
         .from('sms_credit_transactions')
         .insert({
           organization_id: organizationId,
@@ -772,8 +798,16 @@ export class PaymentsService {
           metadata: { reference, amountGhs },
         });
 
+      if (txError) {
+        this.logger.error(`Failed to insert transaction ledger entry: ${txError.message}`, txError);
+        // We log but don't throw to not revert the balance update if the ledger fails, 
+        // though ideally this should be an RPC transaction.
+      }
+
+      this.logger.log(`SMS purchase verification completed successfully.`);
       return { success: true, newBalance };
     } catch (error) {
+      this.logger.error(`Error during SMS purchase verification: ${error instanceof Error ? error.message : String(error)}`, error instanceof Error ? error.stack : undefined);
       if (error instanceof BadRequestException || error instanceof InternalServerErrorException) {
         throw error;
       }
