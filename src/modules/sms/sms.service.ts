@@ -89,13 +89,13 @@ export class SmsService {
       }
       return this.arkeselService.sendTemplateSms(dto.sender, parsedMessage, arkeselTemplateRecipients, dto.sandbox, finalCallbackUrl);
     } else {
-      // Standard SMS - just an array of phone numbers
-      const phoneNumbersOnly = validRecipients.map(r => r.phone);
+      // Standard SMS - just an array of phone numbers (strings)
+      const phoneNumbersOnly = validRecipients.map(r => r.phone as string);
 
       if (dto.scheduledDate) {
-        return this.arkeselService.scheduleStandardSms(dto.sender, dto.message, phoneNumbersOnly as string[], dto.scheduledDate, dto.sandbox);
+        return this.arkeselService.scheduleStandardSms(dto.sender, dto.message, phoneNumbersOnly, dto.scheduledDate, dto.sandbox);
       }
-      return this.arkeselService.sendStandardSms(dto.sender, dto.message, phoneNumbersOnly as string[], dto.sandbox, finalCallbackUrl);
+      return this.arkeselService.sendStandardSms(dto.sender, dto.message, phoneNumbersOnly, dto.sandbox, finalCallbackUrl);
     }
   }
 
