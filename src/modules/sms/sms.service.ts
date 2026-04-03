@@ -1,7 +1,8 @@
-import { Injectable, Logger, BadRequestException } from '@nestjs/common';
+import { Injectable, Logger, BadRequestException, HttpException, HttpStatus } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { ArkeselService } from '../../common/arkesel/arkesel.service';
 import { ResendService } from '../../common/resend/resend.service';
+import { AppsService } from '../apps/apps.service';
 import { SendSmsRequestDto } from './dto/send-sms.dto';
 import { NotifySenderIdDto } from './dto/notify-sender-id.dto';
 import { normalizeGhanaPhoneNumber } from '../../common/utils/phone.utils';
@@ -14,6 +15,7 @@ export class SmsService {
     private readonly arkeselService: ArkeselService,
     private readonly resendService: ResendService,
     private readonly configService: ConfigService,
+    private readonly appsService: AppsService,
   ) { }
 
   async sendSms(dto: SendSmsRequestDto) {
@@ -45,6 +47,31 @@ export class SmsService {
       throw new BadRequestException('No valid Ghana phone numbers found in recipients');
     }
 
+    if (dto.organizationId && dto.appId) {
+      // PRE-FLIGHT CHECK: Ensure organization has enough credits for minimum 1 part per recipient
+      const supabase = this.appsService.getSupabaseClient(dto.appId);
+      const { data: orgBalance, error: balanceError } = await supabase
+        .from('organization_sms_balances')
+        .select('credit_balance')
+        .eq('organization_id', dto.organizationId)
+        .single();
+
+      if (balanceError || !orgBalance) {
+        throw new BadRequestException('Could not verify organization SMS balance');
+      }
+
+      if (orgBalance.credit_balance < validRecipients.length) {
+        throw new HttpException(`Insufficient SMS credits. Required: ${validRecipients.length}, Available: ${orgBalance.credit_balance}`, HttpStatus.PAYMENT_REQUIRED);
+      }
+    }
+
+    // Attach webhook URL if organization is provided
+    let finalCallbackUrl = dto.callbackUrl;
+    if (dto.organizationId && dto.appId) {
+      const apiUrl = this.configService.get<string>('PUBLIC_API_URL') || 'https://api.fmtsoftware.com';
+      finalCallbackUrl = `${apiUrl}/api/sms/webhook/arkesel?orgId=${dto.organizationId}&appId=${dto.appId}`;
+    }
+
     if (hasVariables) {
       // 1. Convert message variables from {var} to <%var%> for Arkesel
       const parsedMessage = dto.message.replace(/\{([^}]+)\}/g, '<%$1%>');
@@ -60,7 +87,7 @@ export class SmsService {
       if (dto.scheduledDate) {
         return this.arkeselService.scheduleTemplateSms(dto.sender, parsedMessage, arkeselTemplateRecipients, dto.scheduledDate, dto.sandbox);
       }
-      return this.arkeselService.sendTemplateSms(dto.sender, parsedMessage, arkeselTemplateRecipients, dto.sandbox, dto.callbackUrl);
+      return this.arkeselService.sendTemplateSms(dto.sender, parsedMessage, arkeselTemplateRecipients, dto.sandbox, finalCallbackUrl);
     } else {
       // Standard SMS - just an array of phone numbers
       const phoneNumbersOnly = validRecipients.map(r => r.phone);
@@ -68,8 +95,84 @@ export class SmsService {
       if (dto.scheduledDate) {
         return this.arkeselService.scheduleStandardSms(dto.sender, dto.message, phoneNumbersOnly as string[], dto.scheduledDate, dto.sandbox);
       }
-      return this.arkeselService.sendStandardSms(dto.sender, dto.message, phoneNumbersOnly as string[], dto.sandbox, dto.callbackUrl);
+      return this.arkeselService.sendStandardSms(dto.sender, dto.message, phoneNumbersOnly as string[], dto.sandbox, finalCallbackUrl);
     }
+  }
+
+  async handleArkeselWebhook(payload: any, orgId: string, appId: string) {
+    if (!orgId || !appId) {
+      this.logger.warn('Arkesel webhook received without an organization ID or App ID in the query params.');
+      return;
+    }
+
+    // Usually the payload from Arkesel has an ID, recipient, status, and message_count.
+    const { id, recipient, status, message_count } = payload;
+
+    if (status !== 'DELIVERED' && status !== 'SENT') {
+      // Depending on requirements, we might only deduct for SENT/DELIVERED,
+      // but usually the provider charges upon submission unless failed immediately.
+      // Assuming Arkesel charges for any processed message, we proceed for "SENT" or "DELIVERED".
+      // Adjust if Arkesel payload uses different keys or you want to deduct even for failures.
+    }
+
+    const messageCount = Number(message_count) || 1; // Fallback to 1 if not provided
+
+    const supabase = this.appsService.getSupabaseClient(appId);
+
+    // Use RPC to safely deduct credits and record transaction to avoid race conditions
+    // We'll simulate it with direct queries for now, but an RPC is safer for concurrency.
+    const { data: balanceData, error: balanceError } = await supabase
+      .from('organization_sms_balances')
+      .select('credit_balance, bonus_credits_received')
+      .eq('organization_id', orgId)
+      .single();
+
+    if (balanceError || !balanceData) {
+      this.logger.error(`Could not find SMS balance for organization: ${orgId}`);
+      return;
+    }
+
+    let newBalance = balanceData.credit_balance - messageCount;
+    let bonusAmount = 0;
+
+    if (newBalance < 0) {
+      bonusAmount = Math.abs(newBalance);
+      newBalance = 0; // Prevent negative balances
+    }
+
+    // 1. Update the balance
+    await supabase
+      .from('organization_sms_balances')
+      .update({
+        credit_balance: newBalance,
+        bonus_credits_received: balanceData.bonus_credits_received + bonusAmount,
+      })
+      .eq('organization_id', orgId);
+
+    // 2. Record the usage transaction
+    const usageAmount = messageCount - bonusAmount; // What was actually deducted from balance
+    if (usageAmount > 0) {
+      await supabase.from('sms_credit_transactions').insert({
+        organization_id: orgId,
+        type: 'usage',
+        amount: -usageAmount,
+        description: `SMS sent to ${recipient || 'unknown'}`,
+        metadata: payload,
+      });
+    }
+
+    // 3. Record the bonus transaction if there was an overdraft
+    if (bonusAmount > 0) {
+      await supabase.from('sms_credit_transactions').insert({
+        organization_id: orgId,
+        type: 'bonus',
+        amount: bonusAmount,
+        description: `Bonus coverage for multipart SMS to ${recipient || 'unknown'}`,
+        metadata: payload,
+      });
+    }
+
+    this.logger.log(`Webhook processed for SMS ${id} to ${recipient}. Org: ${orgId}. Used: ${messageCount}, Bonus: ${bonusAmount}.`);
   }
 
   async checkBalance() {

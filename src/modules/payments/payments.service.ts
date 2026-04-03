@@ -1,15 +1,19 @@
 import { Injectable, BadRequestException, InternalServerErrorException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { SupabaseService } from '../../common/supabase/supabase.service';
+import { AppsService } from '../apps/apps.service';
 import { PurchasesService } from '../purchases/purchases.service';
 import { IssuesService } from '../issues/issues.service';
 import { HubtelCheckoutRequestDto, HubtelConfigRequestDto, HubtelStatusRequestDto } from './dto/hubtel.dto';
 import { PaystackCheckoutDto, PaystackInitializeDto } from './dto/paystack.dto';
+import { VerifySmsPurchaseDto } from './dto/verify-sms-purchase.dto';
+import { InitializeSmsPurchaseDto } from './dto/initialize-sms-purchase.dto';
 
 @Injectable()
 export class PaymentsService {
   constructor(
     private readonly supabaseService: SupabaseService,
+    private readonly appsService: AppsService,
     private readonly purchasesService: PurchasesService,
     private readonly issuesService: IssuesService,
     private readonly configService: ConfigService,
@@ -630,6 +634,150 @@ export class PaymentsService {
         'POST'
       );
       throw new BadRequestException('Invalid request payload or Hubtel error');
+    }
+  }
+
+  async initializeSmsPurchase(dto: InitializeSmsPurchaseDto) {
+    const { amountGhs, email, callbackUrl, organizationId, userId, appId, creditsPurchased } = dto;
+    const secretKey = this.configService.get<string>('PAYSTACK_SECRET_KEY');
+
+    if (!secretKey) {
+      throw new InternalServerErrorException('Paystack secret key is missing');
+    }
+
+    try {
+      const response = await fetch('https://api.paystack.co/transaction/initialize', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${secretKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          email,
+          amount: amountGhs * 100, // Paystack expects pesewas
+          callback_url: callbackUrl,
+          metadata: {
+            organizationId,
+            userId,
+            appId,
+            creditsPurchased,
+            amountGhs,
+          },
+        }),
+      });
+
+      const data = await response.json();
+
+      if (!response.ok || !data.status) {
+        throw new BadRequestException(data.message || 'Failed to initialize Paystack transaction');
+      }
+
+      // Return the authorization_url to redirect the user
+      return { authorizationUrl: data.data.authorization_url, reference: data.data.reference };
+    } catch (error) {
+      if (error instanceof BadRequestException || error instanceof InternalServerErrorException) {
+        throw error;
+      }
+      throw new InternalServerErrorException('An unexpected error occurred during Paystack initialization');
+    }
+  }
+
+  async verifySmsPurchase(dto: VerifySmsPurchaseDto) {
+    const { organizationId, userId, reference, amountGhs, creditsPurchased, appId } = dto;
+    const paystackSecret = this.configService.get<string>('PAYSTACK_SECRET_KEY');
+
+    if (!paystackSecret) {
+      throw new InternalServerErrorException('Paystack secret key is missing');
+    }
+
+    try {
+      // 1. Verify the transaction with Paystack
+      const verifyResponse = await fetch(`https://api.paystack.co/transaction/verify/${reference}`, {
+        headers: {
+          Authorization: `Bearer ${paystackSecret}`,
+        },
+      });
+
+      const verifyData = await verifyResponse.json();
+
+      if (!verifyResponse.ok || !verifyData.status || verifyData.data.status !== 'success') {
+        throw new BadRequestException('Payment verification failed');
+      }
+
+      // Check if amount matches (Paystack returns amount in pesewas)
+      const paystackAmountGhs = verifyData.data.amount / 100;
+      if (paystackAmountGhs !== amountGhs) {
+        throw new BadRequestException('Payment amount mismatch');
+      }
+
+      // Get the app-specific Supabase client
+      const supabase = this.appsService.getSupabaseClient(appId);
+
+      // 2. Check if we already processed this reference
+      const { data: existingRecord } = await supabase
+        .from('payment_records')
+        .select('id')
+        .eq('gateway_reference', reference)
+        .maybeSingle();
+
+      if (existingRecord) {
+        return { success: true, message: 'Payment already processed' };
+      }
+
+      // 3. Create the payment record
+      const { error: paymentError } = await supabase
+        .from('payment_records')
+        .insert({
+          organization_id: organizationId,
+          user_id: userId,
+          amount_paid: amountGhs,
+          credits_purchased: creditsPurchased,
+          gateway_reference: reference,
+          status: 'success',
+        });
+
+      if (paymentError) {
+        throw new InternalServerErrorException('Failed to record payment');
+      }
+
+      // 4. Update the organization's SMS balance
+      const { data: currentBalance } = await supabase
+        .from('organization_sms_balances')
+        .select('credit_balance')
+        .eq('organization_id', organizationId)
+        .single();
+
+      const newBalance = (currentBalance?.credit_balance || 0) + creditsPurchased;
+
+      const { error: balanceError } = await supabase
+        .from('organization_sms_balances')
+        .upsert({
+          organization_id: organizationId,
+          credit_balance: newBalance,
+          updated_at: new Date().toISOString(),
+        });
+
+      if (balanceError) {
+        throw new InternalServerErrorException('Failed to update SMS balance');
+      }
+
+      // 5. Create the transaction ledger entry
+      await supabase
+        .from('sms_credit_transactions')
+        .insert({
+          organization_id: organizationId,
+          type: 'purchase',
+          amount: creditsPurchased,
+          description: `Purchased ${creditsPurchased} credits via Paystack`,
+          metadata: { reference, amountGhs },
+        });
+
+      return { success: true, newBalance };
+    } catch (error) {
+      if (error instanceof BadRequestException || error instanceof InternalServerErrorException) {
+        throw error;
+      }
+      throw new InternalServerErrorException('An unexpected error occurred during verification');
     }
   }
 }

@@ -14,7 +14,11 @@ export class NotifySenderIdDto {
     reason: string;
 
     @IsString()
-    @IsOptional()
-    @IsIn(['created', 'resubmitted'])
-    action?: 'created' | 'resubmitted';
+  @IsOptional()
+  @IsIn(['created', 'resubmitted'])
+  action?: 'created' | 'resubmitted';
+
+  @IsString()
+  @IsOptional()
+  appId?: string;
 }

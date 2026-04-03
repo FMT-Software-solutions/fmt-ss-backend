@@ -32,5 +32,13 @@ export class SendSmsRequestDto {
 
   @IsOptional()
   @IsString()
+  organizationId?: string;
+
+  @IsOptional()
+  @IsString()
+  appId?: string;
+
+  @IsOptional()
+  @IsString()
   callbackUrl?: string;
 }

@@ -1,4 +1,4 @@
-import { Controller, Post, Get, Body, Param } from '@nestjs/common';
+import { Controller, Post, Get, Body, Param, Query } from '@nestjs/common';
 import { SmsService } from './sms.service';
 import { SendSmsRequestDto } from './dto/send-sms.dto';
 import { NotifySenderIdDto } from './dto/notify-sender-id.dto';
@@ -8,6 +8,12 @@ import { ApiTags, ApiOperation } from '@nestjs/swagger';
 @Controller('sms')
 export class SmsController {
   constructor(private readonly smsService: SmsService) { }
+
+  @Post('webhook/arkesel')
+  @ApiOperation({ summary: 'Receive delivery reports from Arkesel' })
+  async handleArkeselWebhook(@Body() payload: any, @Query('orgId') orgId: string, @Query('appId') appId: string) {
+    return this.smsService.handleArkeselWebhook(payload, orgId, appId);
+  }
 
   @Post('send')
   @ApiOperation({ summary: 'Send SMS (automatically detects if it needs Arkesel standard or template API)' })

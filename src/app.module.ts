@@ -18,6 +18,7 @@ import { TestimonialsModule } from './modules/testimonials/testimonials.module';
 import { ReviewsModule } from './modules/reviews/reviews.module';
 import { QuotesModule } from './modules/quotes/quotes.module';
 import { SmsModule } from './modules/sms/sms.module';
+import { AppsModule } from './modules/apps/apps.module';
 
 @Module({
   imports: [
@@ -28,6 +29,7 @@ import { SmsModule } from './modules/sms/sms.module';
       ttl: 60000,
       limit: 10,
     }]),
+    AppsModule,
     SupabaseModule,
     ResendModule,
     SanityModule,
