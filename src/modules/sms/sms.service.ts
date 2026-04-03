@@ -100,6 +100,7 @@ export class SmsService {
   }
 
   async handleArkeselWebhook(payload: any, orgId: string, appId: string) {
+    this.logger.log(`Received Arkesel webhook payload: ${JSON.stringify(payload)}`);
     if (!orgId || !appId) {
       this.logger.warn('Arkesel webhook received without an organization ID or App ID in the query params.');
       return;
@@ -119,60 +120,24 @@ export class SmsService {
 
     const supabase = this.appsService.getSupabaseClient(appId);
 
-    // Use RPC to safely deduct credits and record transaction to avoid race conditions
-    // We'll simulate it with direct queries for now, but an RPC is safer for concurrency.
-    const { data: balanceData, error: balanceError } = await supabase
-      .from('organization_sms_balances')
-      .select('credit_balance, bonus_credits_received')
-      .eq('organization_id', orgId)
-      .single();
-
-    if (balanceError || !balanceData) {
-      this.logger.error(`Could not find SMS balance for organization: ${orgId}`);
-      return;
-    }
-
-    let newBalance = balanceData.credit_balance - messageCount;
-    let bonusAmount = 0;
-
-    if (newBalance < 0) {
-      bonusAmount = Math.abs(newBalance);
-      newBalance = 0; // Prevent negative balances
-    }
-
-    // 1. Update the balance
-    await supabase
-      .from('organization_sms_balances')
-      .update({
-        credit_balance: newBalance,
-        bonus_credits_received: balanceData.bonus_credits_received + bonusAmount,
-      })
-      .eq('organization_id', orgId);
-
-    // 2. Record the usage transaction
-    const usageAmount = messageCount - bonusAmount; // What was actually deducted from balance
-    if (usageAmount > 0) {
-      await supabase.from('sms_credit_transactions').insert({
-        organization_id: orgId,
-        type: 'usage',
-        amount: -usageAmount,
-        description: `SMS sent to ${recipient || 'unknown'}`,
-        metadata: payload,
+    try {
+      // Use the RPC to safely deduct credits and record transactions atomically
+      const { data, error } = await supabase.rpc('deduct_sms_credits', {
+        p_org_id: orgId,
+        p_message_count: messageCount,
+        p_recipient: recipient,
+        p_payload: payload
       });
-    }
 
-    // 3. Record the bonus transaction if there was an overdraft
-    if (bonusAmount > 0) {
-      await supabase.from('sms_credit_transactions').insert({
-        organization_id: orgId,
-        type: 'bonus',
-        amount: bonusAmount,
-        description: `Bonus coverage for multipart SMS to ${recipient || 'unknown'}`,
-        metadata: payload,
-      });
-    }
+      if (error) {
+        this.logger.error(`RPC error deducting SMS balance for organization: ${orgId}`, error);
+        return;
+      }
 
-    this.logger.log(`Webhook processed for SMS ${id} to ${recipient}. Org: ${orgId}. Used: ${messageCount}, Bonus: ${bonusAmount}.`);
+      this.logger.log(`Webhook processed for SMS ${id} to ${recipient}. Org: ${orgId}. Used: ${data?.usage_deducted}, Bonus: ${data?.bonus_applied}, New Balance: ${data?.new_balance}.`);
+    } catch (err) {
+      this.logger.error(`Unexpected error executing RPC deduct_sms_credits for org: ${orgId}`, err);
+    }
   }
 
   async checkBalance() {

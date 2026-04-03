@@ -1,12 +1,31 @@
-import { IsString, IsArray, IsOptional, MaxLength, IsBoolean, ValidateNested } from 'class-validator';
-import { Type } from 'class-transformer';
+import { IsString, IsArray, IsOptional, MaxLength, IsBoolean, ValidatorConstraint, ValidatorConstraintInterface, ValidationArguments, registerDecorator, ValidationOptions } from 'class-validator';
 
-export class SmsRecipientDto {
-  @IsString()
-  phone: string;
+@ValidatorConstraint({ name: 'isValidRecipientsArray', async: false })
+export class IsValidRecipientsArrayConstraint implements ValidatorConstraintInterface {
+  validate(recipients: any, args: ValidationArguments) {
+    if (!Array.isArray(recipients)) return false;
+    for (const recipient of recipients) {
+      if (typeof recipient !== 'object' || recipient === null) return false;
+      if (typeof recipient.phone !== 'string') return false;
+    }
+    return true;
+  }
 
-  // Allow any other dynamic properties (name, first_name, email, etc.)
-  [key: string]: any;
+  defaultMessage(args: ValidationArguments) {
+    return 'Each recipient must be an object containing a "phone" string property.';
+  }
+}
+
+export function IsValidRecipientsArray(validationOptions?: ValidationOptions) {
+  return function (object: Object, propertyName: string) {
+    registerDecorator({
+      target: object.constructor,
+      propertyName: propertyName,
+      options: validationOptions,
+      constraints: [],
+      validator: IsValidRecipientsArrayConstraint,
+    });
+  };
 }
 
 export class SendSmsRequestDto {
@@ -18,9 +37,8 @@ export class SendSmsRequestDto {
   message: string;
 
   @IsArray()
-  @ValidateNested({ each: true })
-  @Type(() => SmsRecipientDto)
-  recipients: SmsRecipientDto[];
+  @IsValidRecipientsArray()
+  recipients: Record<string, any>[];
 
   @IsOptional()
   @IsString()
