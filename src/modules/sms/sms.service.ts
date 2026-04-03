@@ -126,7 +126,8 @@ export class SmsService {
     }
 
     // Usually the payload from Arkesel has an ID, recipient, status, and message_count.
-    const { id, recipient, status, message_count } = payload;
+    const { id, recipient, status, message_count, to } = payload;
+    const actualRecipient = recipient || to || null;
 
     if (status !== 'DELIVERED' && status !== 'SENT') {
       // Depending on requirements, we might only deduct for SENT/DELIVERED,
@@ -141,11 +142,12 @@ export class SmsService {
 
     try {
       // Use the RPC to safely deduct credits and record transactions atomically
+      // explicitly passing null for undefined properties so PostgREST matches the function signature
       const { data, error } = await supabase.rpc('deduct_sms_credits', {
         p_org_id: orgId,
         p_message_count: messageCount,
-        p_recipient: recipient,
-        p_payload: payload
+        p_recipient: actualRecipient,
+        p_payload: payload || {}
       });
 
       if (error) {
