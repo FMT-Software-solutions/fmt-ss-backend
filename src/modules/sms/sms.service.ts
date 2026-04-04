@@ -6,6 +6,7 @@ import { AppsService } from '../apps/apps.service';
 import { SendSmsRequestDto } from './dto/send-sms.dto';
 import { NotifySenderIdDto } from './dto/notify-sender-id.dto';
 import { normalizeGhanaPhoneNumber } from '../../common/utils/phone.utils';
+import { calculateTotalSmsCost } from './utils/sms-calculator.util';
 
 @Injectable()
 export class SmsService {
@@ -47,9 +48,13 @@ export class SmsService {
       throw new BadRequestException('No valid Ghana phone numbers found in recipients');
     }
 
+    // EXACT COST CALCULATION
+    const totalCost = calculateTotalSmsCost(dto.message, validRecipients, hasVariables);
+    let supabase: any = null;
+
     if (dto.organizationId && dto.appId) {
-      // PRE-FLIGHT CHECK: Ensure organization has enough credits for minimum 1 part per recipient
-      const supabase = this.appsService.getSupabaseClient(dto.appId);
+      // PRE-FLIGHT CHECK: Ensure organization has enough credits for the total calculated cost
+      supabase = this.appsService.getSupabaseClient(dto.appId);
       const { data: orgBalance, error: balanceError } = await supabase
         .from('organization_sms_balances')
         .select('credit_balance')
@@ -60,17 +65,12 @@ export class SmsService {
         throw new BadRequestException('Could not verify organization SMS balance');
       }
 
-      if (orgBalance.credit_balance < validRecipients.length) {
-        throw new HttpException(`Insufficient SMS credits. Required: ${validRecipients.length}, Available: ${orgBalance.credit_balance}`, HttpStatus.PAYMENT_REQUIRED);
+      if (orgBalance.credit_balance < totalCost) {
+        throw new HttpException(`Insufficient SMS credits. Required: ${totalCost}, Available: ${orgBalance.credit_balance}`, HttpStatus.PAYMENT_REQUIRED);
       }
     }
 
-    // Attach webhook URL if organization is provided
-    let finalCallbackUrl = dto.callbackUrl;
-    if (dto.organizationId && dto.appId) {
-      const apiUrl = this.configService.get<string>('PUBLIC_API_URL') || 'https://api.fmtsoftware.com';
-      finalCallbackUrl = `${apiUrl}/api/sms/webhook/arkesel?orgId=${dto.organizationId}&appId=${dto.appId}`;
-    }
+    let sendResult;
 
     if (hasVariables) {
       // Extract all expected variables from the message string (e.g., {first_name} -> first_name)
@@ -101,64 +101,44 @@ export class SmsService {
         return acc;
       }, {} as Record<string, Record<string, string>>);
 
-      console.log(arkeselTemplateRecipients);
-
       if (dto.scheduledDate) {
-        return this.arkeselService.scheduleTemplateSms(dto.sender, parsedMessage, arkeselTemplateRecipients, dto.scheduledDate, dto.sandbox);
+        sendResult = await this.arkeselService.scheduleTemplateSms(dto.sender, parsedMessage, arkeselTemplateRecipients, dto.scheduledDate, dto.sandbox);
+      } else {
+        sendResult = await this.arkeselService.sendTemplateSms(dto.sender, parsedMessage, arkeselTemplateRecipients, dto.sandbox);
       }
-      return this.arkeselService.sendTemplateSms(dto.sender, parsedMessage, arkeselTemplateRecipients, dto.sandbox, finalCallbackUrl);
     } else {
       // Standard SMS - just an array of phone numbers (strings)
       const phoneNumbersOnly = validRecipients.map(r => r.phone as string);
 
       if (dto.scheduledDate) {
-        return this.arkeselService.scheduleStandardSms(dto.sender, dto.message, phoneNumbersOnly, dto.scheduledDate, dto.sandbox);
+        sendResult = await this.arkeselService.scheduleStandardSms(dto.sender, dto.message, phoneNumbersOnly, dto.scheduledDate, dto.sandbox);
+      } else {
+        sendResult = await this.arkeselService.sendStandardSms(dto.sender, dto.message, phoneNumbersOnly, dto.sandbox);
       }
-      return this.arkeselService.sendStandardSms(dto.sender, dto.message, phoneNumbersOnly, dto.sandbox, finalCallbackUrl);
-    }
-  }
-
-  async handleArkeselWebhook(payload: any, orgId: string, appId: string) {
-    this.logger.log(`Received Arkesel webhook payload: ${JSON.stringify(payload)}`);
-    if (!orgId || !appId) {
-      this.logger.warn('Arkesel webhook received without an organization ID or App ID in the query params.');
-      return;
     }
 
-    // Usually the payload from Arkesel has an ID, recipient, status, and message_count.
-    const { id, recipient, status, message_count, to } = payload;
-    const actualRecipient = recipient || to || null;
+    // SYNCHRONOUS CREDIT DEDUCTION
+    if (supabase && dto.organizationId) {
+      try {
+        const recipientDesc = validRecipients.length === 1 ? validRecipients[0].phone : `Bulk (${validRecipients.length} recipients)`;
+        const { data, error } = await supabase.rpc('deduct_sms_credits', {
+          p_org_id: dto.organizationId,
+          p_message_count: totalCost,
+          p_recipient: recipientDesc,
+          p_payload: { message: dto.message, totalCost, recipientsCount: validRecipients.length, isTemplate: hasVariables }
+        });
 
-    if (status !== 'DELIVERED' && status !== 'SENT') {
-      // Depending on requirements, we might only deduct for SENT/DELIVERED,
-      // but usually the provider charges upon submission unless failed immediately.
-      // Assuming Arkesel charges for any processed message, we proceed for "SENT" or "DELIVERED".
-      // Adjust if Arkesel payload uses different keys or you want to deduct even for failures.
-    }
-
-    const messageCount = Number(message_count) || 1; // Fallback to 1 if not provided
-
-    const supabase = this.appsService.getSupabaseClient(appId);
-
-    try {
-      // Use the RPC to safely deduct credits and record transactions atomically
-      // explicitly passing null for undefined properties so PostgREST matches the function signature
-      const { data, error } = await supabase.rpc('deduct_sms_credits', {
-        p_org_id: orgId,
-        p_message_count: messageCount,
-        p_recipient: actualRecipient,
-        p_payload: payload || {}
-      });
-
-      if (error) {
-        this.logger.error(`RPC error deducting SMS balance for organization: ${orgId}`, error);
-        return;
+        if (error) {
+          this.logger.error(`RPC error deducting SMS balance for organization: ${dto.organizationId} synchronously`, error);
+        } else {
+          this.logger.log(`Synchronous deduction successful. Org: ${dto.organizationId}. Used: ${data?.usage_deducted}, Bonus: ${data?.bonus_applied}, New Balance: ${data?.new_balance}.`);
+        }
+      } catch (err) {
+        this.logger.error(`Unexpected error executing RPC deduct_sms_credits for org: ${dto.organizationId}`, err);
       }
-
-      this.logger.log(`Webhook processed for SMS ${id} to ${recipient}. Org: ${orgId}. Used: ${data?.usage_deducted}, Bonus: ${data?.bonus_applied}, New Balance: ${data?.new_balance}.`);
-    } catch (err) {
-      this.logger.error(`Unexpected error executing RPC deduct_sms_credits for org: ${orgId}`, err);
     }
+
+    return sendResult;
   }
 
   async checkBalance() {
@@ -186,11 +166,12 @@ export class SmsService {
     }
 
     const actionText = dto.action === 'resubmitted' ? 'resubmitted a rejected' : 'requested a new';
-    const subject = `[ChurchHub360] Sender ID Request: ${dto.senderId}`;
+    const appName = dto.appName || dto.appId || 'FMT Software Solutions';
+    const subject = `[${appName}] Sender ID Request: ${dto.senderId}`;
 
     const htmlContent = `
       <h2>Sender ID Request</h2>
-      <p>Organization <strong>${dto.organizationName}</strong> has ${actionText} Sender ID.</p>
+      <p>Organization <strong>${dto.organizationName}</strong> has ${actionText} Sender ID for the app <strong>${appName}</strong>.</p>
       <p><strong>Sender ID:</strong> ${dto.senderId}</p>
       <p><strong>Reason:</strong><br/>${dto.reason}</p>
       <hr/>
@@ -199,7 +180,7 @@ export class SmsService {
 
     try {
       await this.resendService.sendEmail({
-        from: 'ChurchHub360 <noreply@fmtsoftware.com>', // Use verified domain if needed, or fallback
+        from: 'FMT Software Solutions <noreply@fmtsoftware.com>', // Use verified domain if needed, or fallback
         to: adminEmails,
         subject,
         html: htmlContent,

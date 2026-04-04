@@ -1,5 +1,5 @@
 import { ApiProperty } from '@nestjs/swagger';
-import { IsEmail, IsNotEmpty, IsNumber, IsString } from 'class-validator';
+import { IsEmail, IsNotEmpty, IsNumber, IsOptional, IsString } from 'class-validator';
 
 export class InitializeSmsPurchaseDto {
   @ApiProperty()
@@ -22,6 +22,11 @@ export class InitializeSmsPurchaseDto {
   @IsNotEmpty()
   organizationId: string;
 
+  @ApiProperty({ required: false })
+  @IsString()
+  @IsOptional()
+  organizationName?: string;
+
   @ApiProperty()
   @IsString()
   @IsNotEmpty()
@@ -31,6 +36,11 @@ export class InitializeSmsPurchaseDto {
   @IsString()
   @IsNotEmpty()
   appId: string;
+
+  @ApiProperty({ required: false })
+  @IsString()
+  @IsOptional()
+  appName?: string;
 
   @ApiProperty()
   @IsNumber()

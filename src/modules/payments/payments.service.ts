@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { SupabaseService } from '../../common/supabase/supabase.service';
 import { AppsService } from '../apps/apps.service';
 import { PurchasesService } from '../purchases/purchases.service';
+import { ResendService } from '../../common/resend/resend.service';
 import { IssuesService } from '../issues/issues.service';
 import { HubtelCheckoutRequestDto, HubtelConfigRequestDto, HubtelStatusRequestDto } from './dto/hubtel.dto';
 import { PaystackCheckoutDto, PaystackInitializeDto } from './dto/paystack.dto';
@@ -15,10 +16,11 @@ export class PaymentsService {
 
   constructor(
     private readonly supabaseService: SupabaseService,
-    private readonly appsService: AppsService,
-    private readonly purchasesService: PurchasesService,
-    private readonly issuesService: IssuesService,
     private readonly configService: ConfigService,
+    private readonly purchasesService: PurchasesService,
+    private readonly appsService: AppsService,
+    private readonly issuesService: IssuesService,
+    private readonly resendService: ResendService,
   ) { }
 
   private getPurchaseStatus(status?: string) {
@@ -640,7 +642,7 @@ export class PaymentsService {
   }
 
   async initializeSmsPurchase(dto: InitializeSmsPurchaseDto) {
-    const { amountGhs, email, callbackUrl, organizationId, userId, appId, creditsPurchased } = dto;
+    const { amountGhs, email, callbackUrl, organizationId, organizationName, userId, appId, appName, creditsPurchased } = dto;
     const secretKey = this.configService.get<string>('PAYSTACK_SECRET_KEY');
 
     if (!secretKey) {
@@ -660,8 +662,10 @@ export class PaymentsService {
           callback_url: callbackUrl,
           metadata: {
             organizationId,
+            organizationName,
             userId,
             appId,
+            appName,
             creditsPurchased,
             amountGhs,
           },
@@ -686,13 +690,16 @@ export class PaymentsService {
 
   async verifySmsPurchase(dto: VerifySmsPurchaseDto) {
     this.logger.log(`Starting SMS purchase verification for reference: ${dto.reference}, appId: ${dto.appId}, orgId: ${dto.organizationId}`);
-    const { organizationId, userId, reference, amountGhs, creditsPurchased, appId } = dto;
+    const { organizationId, organizationName, userId, reference, amountGhs, creditsPurchased, appId, appName } = dto;
     const paystackSecret = this.configService.get<string>('PAYSTACK_SECRET_KEY');
 
     if (!paystackSecret) {
       this.logger.error('Paystack secret key is missing in environment variables');
       throw new InternalServerErrorException('Paystack secret key is missing');
     }
+
+    // Initialize app-specific supabase client
+    const supabase = this.appsService.getSupabaseClient(appId);
 
     try {
       // 1. Verify the transaction with Paystack
@@ -719,12 +726,7 @@ export class PaymentsService {
         throw new BadRequestException('Payment amount mismatch');
       }
 
-      // Get the app-specific Supabase client
-      this.logger.log(`Retrieving Supabase client for appId: ${appId}`);
-      const supabase = this.appsService.getSupabaseClient(appId);
-
       // 2. Check if we already processed this reference
-      this.logger.log(`Checking for existing payment record with reference: ${reference}`);
       const { data: existingRecord, error: checkExistingError } = await supabase
         .from('payment_records')
         .select('id')
@@ -800,8 +802,40 @@ export class PaymentsService {
 
       if (txError) {
         this.logger.error(`Failed to insert transaction ledger entry: ${txError.message}`, txError);
-        // We log but don't throw to not revert the balance update if the ledger fails, 
-        // though ideally this should be an RPC transaction.
+      }
+
+      // 6. Send Email Notification to Admins
+      try {
+        const adminEmailsString = this.configService.get<string>('ADMIN_EMAILS');
+        if (adminEmailsString) {
+          const adminEmails = adminEmailsString.split(',').map(e => e.trim()).filter(e => e.length > 0);
+          if (adminEmails.length > 0) {
+            const orgName = organizationName || organizationId;
+            const subject = `[FMT Software Solutions] New SMS Credit Purchase: ${orgName}`;
+
+            const htmlContent = `
+              <h2>New SMS Credit Purchase</h2>
+              <p>Organization <strong>${orgName}</strong> has purchased SMS credits.</p>
+              <ul>
+                <li><strong>App:</strong> ${appName || appId}</li>
+                <li><strong>Credits Purchased:</strong> ${creditsPurchased}</li>
+                <li><strong>Amount Paid:</strong> GHS ${amountGhs}</li>
+                <li><strong>Reference:</strong> ${reference}</li>
+              </ul>
+            `;
+
+            await this.resendService.sendEmail({
+              from: 'FMT Software Solutions <noreply@fmtsoftware.com>',
+              to: adminEmails,
+              subject,
+              html: htmlContent,
+            });
+            this.logger.log(`Admin notification email sent for SMS purchase ${reference}`);
+          }
+        }
+      } catch (emailError) {
+        this.logger.error(`Failed to send SMS purchase notification email: ${emailError.message}`);
+        // Do not throw error here to ensure the purchase flow completes successfully for the user
       }
 
       this.logger.log(`SMS purchase verification completed successfully.`);

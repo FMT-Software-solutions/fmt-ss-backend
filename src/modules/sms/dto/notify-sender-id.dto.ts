@@ -21,4 +21,8 @@ export class NotifySenderIdDto {
   @IsString()
   @IsOptional()
   appId?: string;
+
+  @IsString()
+  @IsOptional()
+  appName?: string;
 }

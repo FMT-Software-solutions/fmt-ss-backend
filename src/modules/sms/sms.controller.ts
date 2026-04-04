@@ -9,16 +9,6 @@ import { ApiTags, ApiOperation } from '@nestjs/swagger';
 export class SmsController {
   constructor(private readonly smsService: SmsService) { }
 
-  @Post('webhook/arkesel')
-  @ApiOperation({ summary: 'Receive delivery reports from Arkesel' })
-  async handleArkeselWebhook(@Body() payload: any, @Query() query: any) {
-    const orgId = query.orgId;
-    const appId = query.appId;
-    // Merge query into payload just in case Arkesel sends data in query strings
-    const fullPayload = { ...query, ...payload };
-    return this.smsService.handleArkeselWebhook(fullPayload, orgId, appId);
-  }
-
   @Post('send')
   @ApiOperation({ summary: 'Send SMS (automatically detects if it needs Arkesel standard or template API)' })
   async sendSms(@Body() dto: SendSmsRequestDto) {

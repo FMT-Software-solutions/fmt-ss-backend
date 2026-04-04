@@ -1,4 +1,4 @@
-import { IsString, IsNumber, IsNotEmpty } from 'class-validator';
+import { IsString, IsNumber, IsNotEmpty, IsOptional } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
 
 export class VerifySmsPurchaseDto {
@@ -6,6 +6,11 @@ export class VerifySmsPurchaseDto {
   @IsString()
   @IsNotEmpty()
   organizationId: string;
+
+  @ApiProperty({ required: false })
+  @IsString()
+  @IsOptional()
+  organizationName?: string;
 
   @ApiProperty()
   @IsString()
@@ -21,6 +26,11 @@ export class VerifySmsPurchaseDto {
   @IsString()
   @IsNotEmpty()
   appId: string;
+
+  @ApiProperty({ required: false })
+  @IsString()
+  @IsOptional()
+  appName?: string;
 
   @ApiProperty()
   @IsNumber()
