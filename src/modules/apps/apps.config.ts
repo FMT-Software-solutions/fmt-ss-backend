@@ -21,5 +21,15 @@ export const getRegisteredApps = (configService: ConfigService): AppConfig[] => 
             supabaseUrl: configService.get<string>('CHURCH_HUB_SUPABASE_URL') || '',
             supabaseServiceRoleKey: configService.get<string>('CHURCH_HUB_SUPABASE_SECRET_KEY') || '',
         },
+
+        {
+            id: 'stockflow',
+            name: 'Stock Flow',
+            slug: 'stockflow',
+            description: 'Inventory management platform',
+            envPrefix: 'STOCK_FLOW_',
+            supabaseUrl: configService.get<string>('STOCK_FLOW_SUPABASE_URL') || '',
+            supabaseServiceRoleKey: configService.get<string>('STOCK_FLOW_SUPABASE_SECRET_KEY') || '',
+        },
     ];
 };
