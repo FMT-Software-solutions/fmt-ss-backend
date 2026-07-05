@@ -6,6 +6,8 @@ import { HubtelCheckoutRequestDto, HubtelConfigRequestDto, HubtelStatusRequestDt
 import { PaystackCheckoutDto, PaystackInitializeDto } from './dto/paystack.dto';
 import { VerifySmsPurchaseDto } from './dto/verify-sms-purchase.dto';
 import { InitializeSmsPurchaseDto } from './dto/initialize-sms-purchase.dto';
+import { InitializeStoragePurchaseDto } from './dto/initialize-storage-purchase.dto';
+import { VerifyStoragePurchaseDto } from './dto/verify-storage-purchase.dto';
 
 @ApiTags('Payments')
 @Controller('payments')
@@ -70,5 +72,23 @@ export class PaymentsController {
     @ApiResponse({ status: 400, description: 'Bad Request or Verification Failed' })
     verifySmsPurchase(@Body() payload: VerifySmsPurchaseDto) {
         return this.paymentsService.verifySmsPurchase(payload);
+    }
+
+    @Post('initialize-storage-purchase')
+    @UseGuards(ThrottlerGuard)
+    @ApiOperation({ summary: 'Initialize Paystack storage purchase for redirect' })
+    @ApiResponse({ status: 201, description: 'Purchase initialized, returns authorization_url' })
+    @ApiResponse({ status: 400, description: 'Bad Request' })
+    initializeStoragePurchase(@Body() payload: InitializeStoragePurchaseDto) {
+        return this.paymentsService.initializeStoragePurchase(payload);
+    }
+
+    @Post('verify-storage-purchase')
+    @UseGuards(ThrottlerGuard)
+    @ApiOperation({ summary: 'Verify and record Paystack storage purchase' })
+    @ApiResponse({ status: 201, description: 'Storage purchase verified and recorded' })
+    @ApiResponse({ status: 400, description: 'Bad Request or Verification Failed' })
+    verifyStoragePurchase(@Body() payload: VerifyStoragePurchaseDto) {
+        return this.paymentsService.verifyStoragePurchase(payload);
     }
 }

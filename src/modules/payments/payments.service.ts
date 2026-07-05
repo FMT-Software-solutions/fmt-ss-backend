@@ -9,6 +9,8 @@ import { HubtelCheckoutRequestDto, HubtelConfigRequestDto, HubtelStatusRequestDt
 import { PaystackCheckoutDto, PaystackInitializeDto } from './dto/paystack.dto';
 import { VerifySmsPurchaseDto } from './dto/verify-sms-purchase.dto';
 import { InitializeSmsPurchaseDto } from './dto/initialize-sms-purchase.dto';
+import { InitializeStoragePurchaseDto } from './dto/initialize-storage-purchase.dto';
+import { VerifyStoragePurchaseDto } from './dto/verify-storage-purchase.dto';
 
 @Injectable()
 export class PaymentsService {
@@ -842,6 +844,183 @@ export class PaymentsService {
       return { success: true, newBalance };
     } catch (error) {
       this.logger.error(`Error during SMS purchase verification: ${error instanceof Error ? error.message : String(error)}`, error instanceof Error ? error.stack : undefined);
+      if (error instanceof BadRequestException || error instanceof InternalServerErrorException) {
+        throw error;
+      }
+      throw new InternalServerErrorException('An unexpected error occurred during verification');
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Storage credit purchases
+  //
+  // Same Paystack redirect+verify pattern as SMS credits: `initializeStoragePurchase`
+  // returns the Paystack authorization URL for a redirect; `verifyStoragePurchase`
+  // is called on return, verifies the reference server-side, and grants the
+  // storage bytes to the org (via the `grant_storage` RPC in the app's Supabase).
+  // Idempotent by `gateway_reference` (unique on storage_purchases).
+  // ---------------------------------------------------------------------------
+
+  async initializeStoragePurchase(dto: InitializeStoragePurchaseDto) {
+    const { amountGhs, email, callbackUrl, organizationId, organizationName, userId, appId, appName, bytesPurchased } = dto;
+    const secretKey = this.configService.get<string>('PAYSTACK_SECRET_KEY');
+
+    if (!secretKey) {
+      throw new InternalServerErrorException('Paystack secret key is missing');
+    }
+
+    try {
+      const response = await fetch('https://api.paystack.co/transaction/initialize', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${secretKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          email,
+          amount: amountGhs * 100, // Paystack expects pesewas
+          callback_url: callbackUrl,
+          metadata: {
+            organizationId,
+            organizationName,
+            userId,
+            appId,
+            appName,
+            bytesPurchased,
+            amountGhs,
+            purchaseType: 'storage',
+          },
+        }),
+      });
+
+      const data = await response.json();
+
+      if (!response.ok || !data.status) {
+        throw new BadRequestException(data.message || 'Failed to initialize Paystack transaction');
+      }
+
+      return { authorizationUrl: data.data.authorization_url, reference: data.data.reference };
+    } catch (error) {
+      if (error instanceof BadRequestException || error instanceof InternalServerErrorException) {
+        throw error;
+      }
+      throw new InternalServerErrorException('An unexpected error occurred during Paystack initialization');
+    }
+  }
+
+  async verifyStoragePurchase(dto: VerifyStoragePurchaseDto) {
+    this.logger.log(`Starting storage purchase verification for reference: ${dto.reference}, appId: ${dto.appId}, orgId: ${dto.organizationId}`);
+    const { organizationId, organizationName, userId, reference, amountGhs, bytesPurchased, appId, appName } = dto;
+    const paystackSecret = this.configService.get<string>('PAYSTACK_SECRET_KEY');
+
+    if (!paystackSecret) {
+      throw new InternalServerErrorException('Paystack secret key is missing');
+    }
+
+    const supabase = this.appsService.getSupabaseClient(appId);
+
+    try {
+      // 1. Verify with Paystack
+      const verifyResponse = await fetch(`https://api.paystack.co/transaction/verify/${reference}`, {
+        headers: { Authorization: `Bearer ${paystackSecret}` },
+      });
+      const verifyData = await verifyResponse.json();
+
+      if (!verifyResponse.ok || !verifyData.status || verifyData.data.status !== 'success') {
+        this.logger.error(`Paystack verification failed. Status: ${verifyData.status}, Data status: ${verifyData.data?.status}`);
+        throw new BadRequestException('Payment verification failed');
+      }
+
+      const paystackAmountGhs = verifyData.data.amount / 100;
+      if (paystackAmountGhs !== amountGhs) {
+        this.logger.error(`Payment amount mismatch. Expected: ${amountGhs}, Actual: ${paystackAmountGhs}`);
+        throw new BadRequestException('Payment amount mismatch');
+      }
+
+      // 2. Idempotency check (storage_purchases.gateway_reference is UNIQUE)
+      const { data: existingRecord } = await supabase
+        .from('storage_purchases')
+        .select('id')
+        .eq('gateway_reference', reference)
+        .maybeSingle();
+
+      if (existingRecord) {
+        this.logger.log(`Storage purchase already processed. Existing record ID: ${existingRecord.id}`);
+        return { success: true, message: 'Payment already processed' };
+      }
+
+      // 3. Record the purchase (creates an audit row before granting)
+      const { error: purchaseError } = await supabase
+        .from('storage_purchases')
+        .insert({
+          organization_id: organizationId,
+          user_id: userId,
+          bytes_purchased: bytesPurchased,
+          amount_ghs: amountGhs,
+          gateway_reference: reference,
+          status: 'success',
+          metadata: { reference, amountGhs, appId, appName },
+        });
+
+      if (purchaseError) {
+        this.logger.error(`Failed to insert storage_purchases: ${purchaseError.message}`, purchaseError);
+        throw new InternalServerErrorException('Failed to record payment');
+      }
+
+      // 4. Grant bytes to the org (RPC increments quota_bytes atomically)
+      const { error: grantError } = await supabase.rpc('grant_storage', {
+        org_id: organizationId,
+        bytes: bytesPurchased,
+      });
+      if (grantError) {
+        this.logger.error(`grant_storage failed: ${grantError.message}`, grantError);
+        throw new InternalServerErrorException('Failed to grant storage');
+      }
+
+      // 5. Read the resulting quota so the client can update UI immediately
+      const { data: quotaRow } = await supabase
+        .from('organization_storage')
+        .select('quota_bytes, used_bytes')
+        .eq('organization_id', organizationId)
+        .maybeSingle();
+
+      // 6. Notify admins (best-effort)
+      try {
+        const adminEmailsString = this.configService.get<string>('ADMIN_EMAILS');
+        if (adminEmailsString) {
+          const adminEmails = adminEmailsString.split(',').map(e => e.trim()).filter(e => e.length > 0);
+          if (adminEmails.length > 0) {
+            const orgName = organizationName || organizationId;
+            const gib = (bytesPurchased / (1024 * 1024 * 1024)).toFixed(2);
+            await this.resendService.sendEmail({
+              from: 'FMT Software Solutions <noreply@fmtsoftware.com>',
+              to: adminEmails,
+              subject: `[FMT Software Solutions] New Storage Purchase: ${orgName}`,
+              html: `
+                <h2>New Storage Purchase</h2>
+                <p>Organization <strong>${orgName}</strong> has purchased storage.</p>
+                <ul>
+                  <li><strong>App:</strong> ${appName || appId}</li>
+                  <li><strong>Storage Purchased:</strong> ${gib} GiB (${bytesPurchased} bytes)</li>
+                  <li><strong>Amount Paid:</strong> GHS ${amountGhs}</li>
+                  <li><strong>Reference:</strong> ${reference}</li>
+                </ul>
+              `,
+            });
+          }
+        }
+      } catch (emailError) {
+        this.logger.error(`Failed to send storage purchase notification email: ${emailError.message}`);
+      }
+
+      this.logger.log(`Storage purchase verification completed successfully.`);
+      return {
+        success: true,
+        quotaBytes: quotaRow?.quota_bytes ?? null,
+        usedBytes: quotaRow?.used_bytes ?? null,
+      };
+    } catch (error) {
+      this.logger.error(`Error during storage purchase verification: ${error instanceof Error ? error.message : String(error)}`, error instanceof Error ? error.stack : undefined);
       if (error instanceof BadRequestException || error instanceof InternalServerErrorException) {
         throw error;
       }

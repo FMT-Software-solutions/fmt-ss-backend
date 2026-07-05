@@ -31,5 +31,15 @@ export const getRegisteredApps = (configService: ConfigService): AppConfig[] => 
             supabaseUrl: configService.get<string>('STOCK_FLOW_SUPABASE_URL') || '',
             supabaseServiceRoleKey: configService.get<string>('STOCK_FLOW_SUPABASE_SECRET_KEY') || '',
         },
+
+        {
+            id: 'print-calc-pro',
+            name: 'Print Suite Pro',
+            slug: 'print-calc-pro',
+            description: 'Printing business suite (Job Tracker, Price Calculator, Invoicing)',
+            envPrefix: 'PRINT_CALC_',
+            supabaseUrl: configService.get<string>('PRINT_CALC_SUPABASE_URL') || '',
+            supabaseServiceRoleKey: configService.get<string>('PRINT_CALC_SUPABASE_SECRET_KEY') || '',
+        },
     ];
 };
