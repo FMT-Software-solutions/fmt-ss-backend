@@ -48,11 +48,15 @@ export class StorageService {
     private readonly configService: ConfigService,
     private readonly appsService: AppsService,
   ) {
-    const endpoint = this.configService.get<string>('CLOUDFLARE_R2_ENDPOINT');
-    const accessKeyId = this.configService.get<string>('CLOUDFLARE_R2_ACCESS_KEY_ID');
-    const secretAccessKey = this.configService.get<string>('CLOUDFLARE_R2_SECRET_ACCESS_KEY');
+    // FMTSS_ prefixed vars point at the shared FMT-SS Cloudflare R2 account
+    // used by all apps (Job Tracker artwork, future uploads). The legacy
+    // CLOUDFLARE_R2_* vars used by src/modules/files/ are a separate,
+    // app-specific account and are deliberately NOT reused here.
+    const endpoint = this.configService.get<string>('FMTSS_CLOUDFLARE_R2_ENDPOINT');
+    const accessKeyId = this.configService.get<string>('FMTSS_CLOUDFLARE_R2_ACCESS_KEY_ID');
+    const secretAccessKey = this.configService.get<string>('FMTSS_CLOUDFLARE_R2_SECRET_ACCESS_KEY');
     this.bucket =
-      this.configService.get<string>('CLOUDFLARE_R2_BUCKET') || 'fmt-software-solutions';
+      this.configService.get<string>('FMTSS_CLOUDFLARE_R2_BUCKET') || 'fmt-software-solutions';
 
     if (endpoint && accessKeyId && secretAccessKey) {
       this.s3Client = new S3Client({
