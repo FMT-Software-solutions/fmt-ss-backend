@@ -42,7 +42,9 @@ export class StorageService {
   private s3Client: S3Client | null = null;
   private readonly bucket: string;
   // Hard cap per file regardless of remaining quota (defends the API/R2).
-  private readonly maxFileBytes = 100 * 1024 * 1024; // 100 MB
+  // Keep in sync with the client-side constant in
+  // print-calc-pro/src/types/storage.ts `MAX_UPLOAD_FILE_BYTES`.
+  private readonly maxFileBytes = 70 * 1024 * 1024; // 70 MB
 
   constructor(
     private readonly configService: ConfigService,

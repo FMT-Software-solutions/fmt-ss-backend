@@ -70,6 +70,17 @@ export class SmsService {
       }
     }
 
+    // Request an Arkesel delivery webhook when the caller passed a history row id
+    // and we have a public URL to receive the callback. Optional — skipped for
+    // callers/apps that don't opt in.
+    const publicApiUrl = this.configService.get<string>('PUBLIC_API_URL');
+    let callbackUrl: string | undefined;
+    if (dto.messageRef && publicApiUrl && dto.appId) {
+      callbackUrl =
+        `${publicApiUrl.replace(/\/$/, '')}/api/sms/webhook/arkesel` +
+        `?ref=${encodeURIComponent(dto.messageRef)}&app_id=${encodeURIComponent(dto.appId)}`;
+    }
+
     let sendResult;
 
     if (hasVariables) {
@@ -104,7 +115,7 @@ export class SmsService {
       if (dto.scheduledDate) {
         sendResult = await this.arkeselService.scheduleTemplateSms(dto.sender, parsedMessage, arkeselTemplateRecipients, dto.scheduledDate, dto.sandbox);
       } else {
-        sendResult = await this.arkeselService.sendTemplateSms(dto.sender, parsedMessage, arkeselTemplateRecipients, dto.sandbox);
+        sendResult = await this.arkeselService.sendTemplateSms(dto.sender, parsedMessage, arkeselTemplateRecipients, dto.sandbox, callbackUrl);
       }
     } else {
       // Standard SMS - just an array of phone numbers (strings)
@@ -113,11 +124,26 @@ export class SmsService {
       if (dto.scheduledDate) {
         sendResult = await this.arkeselService.scheduleStandardSms(dto.sender, dto.message, phoneNumbersOnly, dto.scheduledDate, dto.sandbox);
       } else {
-        sendResult = await this.arkeselService.sendStandardSms(dto.sender, dto.message, phoneNumbersOnly, dto.sandbox);
+        sendResult = await this.arkeselService.sendStandardSms(dto.sender, dto.message, phoneNumbersOnly, dto.sandbox, callbackUrl);
       }
     }
 
-    // SYNCHRONOUS CREDIT DEDUCTION
+    // Only deduct once Arkesel confirms it accepted the message. A non-'success'
+    // body (bad sender ID, blacklisted numbers, provider error) must NOT be
+    // charged — fetchApi already throws on HTTP errors, this guards the
+    // body-level error case (HTTP 200 with status !== 'success').
+    const providerSucceeded = !!sendResult && sendResult.status === 'success';
+    if (!providerSucceeded) {
+      this.logger.error(
+        `Arkesel did not confirm success for org ${dto.organizationId}: ${JSON.stringify(sendResult)}`,
+      );
+      throw new HttpException(
+        'The SMS provider did not accept the message. No credits were deducted.',
+        HttpStatus.BAD_GATEWAY,
+      );
+    }
+
+    // SYNCHRONOUS CREDIT DEDUCTION (only after confirmed provider success)
     if (supabase && dto.organizationId) {
       try {
         const recipientDesc = validRecipients.length === 1 ? validRecipients[0].phone : `Bulk (${validRecipients.length} recipients)`;
@@ -150,6 +176,46 @@ export class SmsService {
       throw new BadRequestException('SMS ID is required');
     }
     return this.arkeselService.getSmsDetails(smsId);
+  }
+
+  /**
+   * Arkesel delivery-report webhook. Updates the linked communication_history row
+   * (via `ref`) from 'sent' to 'delivered'/'failed'. Always acks 200 so Arkesel
+   * doesn't retry-storm; parses defensively since the DLR body shape can vary.
+   */
+  async handleDeliveryWebhook(ref: string | undefined, appId: string | undefined, body: any) {
+    try {
+      if (!ref || !appId) {
+        this.logger.warn('Delivery webhook missing ref or app_id; acknowledging without update');
+        return { received: true };
+      }
+
+      const supabase = this.appsService.getSupabaseClient(appId);
+      const reports = Array.isArray(body) ? body : [body];
+
+      for (const report of reports) {
+        if (!report || typeof report !== 'object') continue;
+        const recipient =
+          report.recipient ?? report.phone_number ?? report.phone ?? report.to ?? null;
+        const rawStatus = report.status ?? report.delivery_status ?? report.state ?? '';
+        const status = String(rawStatus).toUpperCase();
+        if (!status) continue;
+
+        const { error } = await supabase.rpc('record_sms_delivery', {
+          p_ref: ref,
+          p_recipient: recipient ? String(recipient) : null,
+          p_status: status,
+        });
+        if (error) {
+          this.logger.error(`record_sms_delivery failed for ref ${ref}: ${error.message}`);
+        }
+      }
+
+      return { received: true };
+    } catch (err) {
+      this.logger.error(`Error handling delivery webhook for ref ${ref}`, err as Error);
+      return { received: true };
+    }
   }
 
   async notifySenderIdRequest(dto: NotifySenderIdDto) {

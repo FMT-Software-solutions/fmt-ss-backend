@@ -59,4 +59,13 @@ export class SendSmsRequestDto {
   @IsOptional()
   @IsString()
   callbackUrl?: string;
+
+  /**
+   * communication_history row id. When provided (and PUBLIC_API_URL is set), the
+   * backend requests an Arkesel delivery webhook that updates this row's status
+   * from 'sent' to 'delivered'/'failed'. Optional — omitting it skips DLR tracking.
+   */
+  @IsOptional()
+  @IsString()
+  messageRef?: string;
 }

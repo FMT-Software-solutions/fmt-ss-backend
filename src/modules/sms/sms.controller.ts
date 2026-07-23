@@ -32,4 +32,20 @@ export class SmsController {
   async notifySenderIdRequest(@Body() dto: NotifySenderIdDto) {
     return this.smsService.notifySenderIdRequest(dto);
   }
+
+  @Post('webhook/arkesel')
+  @ApiOperation({ summary: 'Arkesel delivery-report webhook (updates communication_history status)' })
+  async arkeselDeliveryWebhook(
+    @Query('ref') ref: string,
+    @Query('app_id') appId: string,
+    @Body() body: any,
+  ) {
+    return this.smsService.handleDeliveryWebhook(ref, appId, body);
+  }
+
+  @Get('webhook/arkesel')
+  @ApiOperation({ summary: 'Arkesel webhook verification handshake' })
+  arkeselDeliveryWebhookVerify() {
+    return { received: true };
+  }
 }

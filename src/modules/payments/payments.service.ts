@@ -762,48 +762,69 @@ export class PaymentsService {
         throw new InternalServerErrorException('Failed to record payment');
       }
 
-      // 4. Update the organization's SMS balance
-      this.logger.log(`Retrieving current SMS balance for orgId: ${organizationId}`);
-      const { data: currentBalance, error: getBalanceError } = await supabase
-        .from('organization_sms_balances')
-        .select('credit_balance')
-        .eq('organization_id', organizationId)
-        .single();
-
-      if (getBalanceError && getBalanceError.code !== 'PGRST116') { // PGRST116 is "No rows found"
-        this.logger.error(`Failed to retrieve current SMS balance: ${getBalanceError.message}`, getBalanceError);
+      // 4 + 5. Add credits to the balance AND write the purchase ledger entry
+      // atomically via RPC (avoids the read-modify-write race). Falls back to the
+      // legacy non-atomic path for app databases that don't have the RPC yet, so
+      // this change is safe across all apps sharing this backend.
+      let creditsRecorded = false;
+      let newBalance: number | null = null;
+      const purchaseDescription = `Purchased ${creditsPurchased} credits via Paystack`;
+      try {
+        const { data: addData, error: addError } = await supabase.rpc('add_sms_credits', {
+          p_org_id: organizationId,
+          p_credits: creditsPurchased,
+          p_description: purchaseDescription,
+          p_metadata: { reference, amountGhs },
+        });
+        if (addError) throw addError;
+        creditsRecorded = true;
+        newBalance = (addData as { new_balance?: number } | null)?.new_balance ?? null;
+        this.logger.log(`Atomically added ${creditsPurchased} credits for org ${organizationId}`);
+      } catch (rpcErr) {
+        this.logger.warn(
+          `add_sms_credits RPC unavailable, falling back to non-atomic update: ${(rpcErr as Error)?.message}`,
+        );
       }
 
-      const newBalance = (currentBalance?.credit_balance || 0) + creditsPurchased;
-      this.logger.log(`Updating SMS balance to: ${newBalance}`);
+      if (!creditsRecorded) {
+        const { data: currentBalance, error: getBalanceError } = await supabase
+          .from('organization_sms_balances')
+          .select('credit_balance')
+          .eq('organization_id', organizationId)
+          .single();
 
-      const { error: balanceError } = await supabase
-        .from('organization_sms_balances')
-        .upsert({
-          organization_id: organizationId,
-          credit_balance: newBalance,
-          updated_at: new Date().toISOString(),
-        });
+        if (getBalanceError && getBalanceError.code !== 'PGRST116') { // PGRST116 is "No rows found"
+          this.logger.error(`Failed to retrieve current SMS balance: ${getBalanceError.message}`, getBalanceError);
+        }
 
-      if (balanceError) {
-        this.logger.error(`Failed to update SMS balance: ${balanceError.message}`, balanceError);
-        throw new InternalServerErrorException('Failed to update SMS balance');
-      }
+        newBalance = (currentBalance?.credit_balance || 0) + creditsPurchased;
 
-      // 5. Create the transaction ledger entry
-      this.logger.log(`Inserting sms_credit_transactions ledger entry...`);
-      const { error: txError } = await supabase
-        .from('sms_credit_transactions')
-        .insert({
-          organization_id: organizationId,
-          type: 'purchase',
-          amount: creditsPurchased,
-          description: `Purchased ${creditsPurchased} credits via Paystack`,
-          metadata: { reference, amountGhs },
-        });
+        const { error: balanceError } = await supabase
+          .from('organization_sms_balances')
+          .upsert({
+            organization_id: organizationId,
+            credit_balance: newBalance,
+            updated_at: new Date().toISOString(),
+          });
 
-      if (txError) {
-        this.logger.error(`Failed to insert transaction ledger entry: ${txError.message}`, txError);
+        if (balanceError) {
+          this.logger.error(`Failed to update SMS balance: ${balanceError.message}`, balanceError);
+          throw new InternalServerErrorException('Failed to update SMS balance');
+        }
+
+        const { error: txError } = await supabase
+          .from('sms_credit_transactions')
+          .insert({
+            organization_id: organizationId,
+            type: 'purchase',
+            amount: creditsPurchased,
+            description: purchaseDescription,
+            metadata: { reference, amountGhs },
+          });
+
+        if (txError) {
+          this.logger.error(`Failed to insert transaction ledger entry: ${txError.message}`, txError);
+        }
       }
 
       // 6. Send Email Notification to Admins
