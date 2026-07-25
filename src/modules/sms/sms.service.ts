@@ -1,4 +1,10 @@
-import { Injectable, Logger, BadRequestException, HttpException, HttpStatus } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  BadRequestException,
+  HttpException,
+  HttpStatus,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { ArkeselService } from '../../common/arkesel/arkesel.service';
 import { ResendService } from '../../common/resend/resend.service';
@@ -6,7 +12,10 @@ import { AppsService } from '../apps/apps.service';
 import { SendSmsRequestDto } from './dto/send-sms.dto';
 import { NotifySenderIdDto } from './dto/notify-sender-id.dto';
 import { normalizeGhanaPhoneNumber } from '../../common/utils/phone.utils';
-import { calculateTotalSmsCost } from './utils/sms-calculator.util';
+import {
+  calculateTotalSmsCost,
+  normalizeGsm7,
+} from './utils/sms-calculator.util';
 
 @Injectable()
 export class SmsService {
@@ -17,26 +26,33 @@ export class SmsService {
     private readonly resendService: ResendService,
     private readonly configService: ConfigService,
     private readonly appsService: AppsService,
-  ) { }
+  ) {}
 
   async sendSms(dto: SendSmsRequestDto) {
     if (!dto.recipients || dto.recipients.length === 0) {
       throw new BadRequestException('At least one recipient is required');
     }
 
-    const hasVariables = /\{([^}]+)\}/.test(dto.message);
+    // Normalise typographic look-alikes (curly quotes, em dashes, ellipsis,
+    // narrow spaces…) to their GSM-7 ASCII twins BEFORE we cost or send, so one
+    // stray character doesn't silently bump the whole message from 160-char
+    // GSM-7 to 70-char UCS-2 and triple the credits. Applies to every SMS the
+    // platform sends — job alerts, broadcasts, quick SMS, templates.
+    const message = normalizeGsm7(dto.message);
+
+    const hasVariables = /\{([^}]+)\}/.test(message);
 
     // Normalize phone numbers and filter out invalid ones
     const normalizedRecipients = dto.recipients
-      .map(recipient => ({
+      .map((recipient) => ({
         ...recipient,
-        phone: normalizeGhanaPhoneNumber(recipient.phone)
+        phone: normalizeGhanaPhoneNumber(recipient.phone),
       }))
-      .filter(recipient => recipient.phone !== null);
+      .filter((recipient) => recipient.phone !== null);
 
     // Remove duplicates based on phone number
     const uniquePhones = new Set<string>();
-    const validRecipients = normalizedRecipients.filter(recipient => {
+    const validRecipients = normalizedRecipients.filter((recipient) => {
       if (uniquePhones.has(recipient.phone!)) {
         return false;
       }
@@ -45,11 +61,17 @@ export class SmsService {
     });
 
     if (validRecipients.length === 0) {
-      throw new BadRequestException('No valid Ghana phone numbers found in recipients');
+      throw new BadRequestException(
+        'No valid Ghana phone numbers found in recipients',
+      );
     }
 
     // EXACT COST CALCULATION
-    const totalCost = calculateTotalSmsCost(dto.message, validRecipients, hasVariables);
+    const totalCost = calculateTotalSmsCost(
+      message,
+      validRecipients,
+      hasVariables,
+    );
     let supabase: any = null;
 
     if (dto.organizationId && dto.appId) {
@@ -62,11 +84,16 @@ export class SmsService {
         .single();
 
       if (balanceError || !orgBalance) {
-        throw new BadRequestException('Could not verify organization SMS balance');
+        throw new BadRequestException(
+          'Could not verify organization SMS balance',
+        );
       }
 
       if (orgBalance.credit_balance < totalCost) {
-        throw new HttpException(`Insufficient SMS credits. Required: ${totalCost}, Available: ${orgBalance.credit_balance}`, HttpStatus.PAYMENT_REQUIRED);
+        throw new HttpException(
+          `Insufficient SMS credits. Required: ${totalCost}, Available: ${orgBalance.credit_balance}`,
+          HttpStatus.PAYMENT_REQUIRED,
+        );
       }
     }
 
@@ -85,46 +112,81 @@ export class SmsService {
 
     if (hasVariables) {
       // Extract all expected variables from the message string (e.g., {first_name} -> first_name)
-      const expectedVariables = [...dto.message.matchAll(/\{([^}]+)\}/g)].map(match => match[1]);
+      const expectedVariables = [...message.matchAll(/\{([^}]+)\}/g)].map(
+        (match) => match[1],
+      );
 
       // 1. Convert message variables from {var} to <%var%> for Arkesel
-      const parsedMessage = dto.message.replace(/\{([^}]+)\}/g, '<%$1%>');
+      const parsedMessage = message.replace(/\{([^}]+)\}/g, '<%$1%>');
 
       // 2. Format recipients to a single object dictionary for Arkesel Template API
-      const arkeselTemplateRecipients = validRecipients.reduce((acc, recipient) => {
-        const { phone, ...otherFields } = recipient;
+      const arkeselTemplateRecipients = validRecipients.reduce(
+        (acc, recipient) => {
+          const { phone, ...otherFields } = recipient;
 
-        // Ensure all expected variables exist on the recipient to prevent Arkesel validation errors
-        const safeVariables: Record<string, string> = {};
-        expectedVariables.forEach(variable => {
-          // If the variable is phone, grab it directly from recipient since we destructured it out of otherFields
-          if (variable === 'phone') {
-            safeVariables[variable] = phone as string;
-            return;
-          }
+          // Ensure all expected variables exist on the recipient to prevent Arkesel validation errors
+          const safeVariables: Record<string, string> = {};
+          expectedVariables.forEach((variable) => {
+            // If the variable is phone, grab it directly from recipient since we destructured it out of otherFields
+            if (variable === 'phone') {
+              safeVariables[variable] = phone as string;
+              return;
+            }
 
-          // Cast otherFields to any to bypass TS indexing error since otherFields type is inferred as unknown
-          const value = (otherFields as any)[variable];
-          safeVariables[variable] = (value !== undefined && value !== null) ? String(value) : '';
-        });
+            // Cast otherFields to any to bypass TS indexing error since otherFields type is inferred as unknown
+            const value = (otherFields as any)[variable];
+            // Normalise the substituted value too — Arkesel renders the template
+            // per-recipient, so a curly apostrophe in a name would re-introduce
+            // UCS-2 even though the template body itself is clean.
+            safeVariables[variable] =
+              value !== undefined && value !== null
+                ? normalizeGsm7(String(value))
+                : '';
+          });
 
-        acc[phone!] = safeVariables;
-        return acc;
-      }, {} as Record<string, Record<string, string>>);
+          acc[phone!] = safeVariables;
+          return acc;
+        },
+        {} as Record<string, Record<string, string>>,
+      );
 
       if (dto.scheduledDate) {
-        sendResult = await this.arkeselService.scheduleTemplateSms(dto.sender, parsedMessage, arkeselTemplateRecipients, dto.scheduledDate, dto.sandbox);
+        sendResult = await this.arkeselService.scheduleTemplateSms(
+          dto.sender,
+          parsedMessage,
+          arkeselTemplateRecipients,
+          dto.scheduledDate,
+          dto.sandbox,
+        );
       } else {
-        sendResult = await this.arkeselService.sendTemplateSms(dto.sender, parsedMessage, arkeselTemplateRecipients, dto.sandbox, callbackUrl);
+        sendResult = await this.arkeselService.sendTemplateSms(
+          dto.sender,
+          parsedMessage,
+          arkeselTemplateRecipients,
+          dto.sandbox,
+          callbackUrl,
+        );
       }
     } else {
       // Standard SMS - just an array of phone numbers (strings)
-      const phoneNumbersOnly = validRecipients.map(r => r.phone as string);
+      const phoneNumbersOnly = validRecipients.map((r) => r.phone as string);
 
       if (dto.scheduledDate) {
-        sendResult = await this.arkeselService.scheduleStandardSms(dto.sender, dto.message, phoneNumbersOnly, dto.scheduledDate, dto.sandbox);
+        sendResult = await this.arkeselService.scheduleStandardSms(
+          dto.sender,
+          message,
+          phoneNumbersOnly,
+          dto.scheduledDate,
+          dto.sandbox,
+        );
       } else {
-        sendResult = await this.arkeselService.sendStandardSms(dto.sender, dto.message, phoneNumbersOnly, dto.sandbox, callbackUrl);
+        sendResult = await this.arkeselService.sendStandardSms(
+          dto.sender,
+          message,
+          phoneNumbersOnly,
+          dto.sandbox,
+          callbackUrl,
+        );
       }
     }
 
@@ -146,21 +208,37 @@ export class SmsService {
     // SYNCHRONOUS CREDIT DEDUCTION (only after confirmed provider success)
     if (supabase && dto.organizationId) {
       try {
-        const recipientDesc = validRecipients.length === 1 ? validRecipients[0].phone : `Bulk (${validRecipients.length} recipients)`;
+        const recipientDesc =
+          validRecipients.length === 1
+            ? validRecipients[0].phone
+            : `Bulk (${validRecipients.length} recipients)`;
         const { data, error } = await supabase.rpc('deduct_sms_credits', {
           p_org_id: dto.organizationId,
           p_message_count: totalCost,
           p_recipient: recipientDesc,
-          p_payload: { message: dto.message, totalCost, recipientsCount: validRecipients.length, isTemplate: hasVariables }
+          p_payload: {
+            message,
+            totalCost,
+            recipientsCount: validRecipients.length,
+            isTemplate: hasVariables,
+          },
         });
 
         if (error) {
-          this.logger.error(`RPC error deducting SMS balance for organization: ${dto.organizationId} synchronously`, error);
+          this.logger.error(
+            `RPC error deducting SMS balance for organization: ${dto.organizationId} synchronously`,
+            error,
+          );
         } else {
-          this.logger.log(`Synchronous deduction successful. Org: ${dto.organizationId}. Used: ${data?.usage_deducted}, Bonus: ${data?.bonus_applied}, New Balance: ${data?.new_balance}.`);
+          this.logger.log(
+            `Synchronous deduction successful. Org: ${dto.organizationId}. Used: ${data?.usage_deducted}, Bonus: ${data?.bonus_applied}, New Balance: ${data?.new_balance}.`,
+          );
         }
       } catch (err) {
-        this.logger.error(`Unexpected error executing RPC deduct_sms_credits for org: ${dto.organizationId}`, err);
+        this.logger.error(
+          `Unexpected error executing RPC deduct_sms_credits for org: ${dto.organizationId}`,
+          err,
+        );
       }
     }
 
@@ -183,10 +261,16 @@ export class SmsService {
    * (via `ref`) from 'sent' to 'delivered'/'failed'. Always acks 200 so Arkesel
    * doesn't retry-storm; parses defensively since the DLR body shape can vary.
    */
-  async handleDeliveryWebhook(ref: string | undefined, appId: string | undefined, body: any) {
+  async handleDeliveryWebhook(
+    ref: string | undefined,
+    appId: string | undefined,
+    body: any,
+  ) {
     try {
       if (!ref || !appId) {
-        this.logger.warn('Delivery webhook missing ref or app_id; acknowledging without update');
+        this.logger.warn(
+          'Delivery webhook missing ref or app_id; acknowledging without update',
+        );
         return { received: true };
       }
 
@@ -196,8 +280,13 @@ export class SmsService {
       for (const report of reports) {
         if (!report || typeof report !== 'object') continue;
         const recipient =
-          report.recipient ?? report.phone_number ?? report.phone ?? report.to ?? null;
-        const rawStatus = report.status ?? report.delivery_status ?? report.state ?? '';
+          report.recipient ??
+          report.phone_number ??
+          report.phone ??
+          report.to ??
+          null;
+        const rawStatus =
+          report.status ?? report.delivery_status ?? report.state ?? '';
         const status = String(rawStatus).toUpperCase();
         if (!status) continue;
 
@@ -207,13 +296,18 @@ export class SmsService {
           p_status: status,
         });
         if (error) {
-          this.logger.error(`record_sms_delivery failed for ref ${ref}: ${error.message}`);
+          this.logger.error(
+            `record_sms_delivery failed for ref ${ref}: ${error.message}`,
+          );
         }
       }
 
       return { received: true };
     } catch (err) {
-      this.logger.error(`Error handling delivery webhook for ref ${ref}`, err as Error);
+      this.logger.error(
+        `Error handling delivery webhook for ref ${ref}`,
+        err as Error,
+      );
       return { received: true };
     }
   }
@@ -221,17 +315,25 @@ export class SmsService {
   async notifySenderIdRequest(dto: NotifySenderIdDto) {
     const adminEmailsString = this.configService.get<string>('ADMIN_EMAILS');
     if (!adminEmailsString) {
-      this.logger.warn('ADMIN_EMAILS not configured, skipping sender ID notification');
+      this.logger.warn(
+        'ADMIN_EMAILS not configured, skipping sender ID notification',
+      );
       return { success: false, message: 'Admin emails not configured' };
     }
 
-    const adminEmails = adminEmailsString.split(',').map(e => e.trim()).filter(e => e.length > 0);
+    const adminEmails = adminEmailsString
+      .split(',')
+      .map((e) => e.trim())
+      .filter((e) => e.length > 0);
 
     if (adminEmails.length === 0) {
       return { success: false, message: 'No valid admin emails found' };
     }
 
-    const actionText = dto.action === 'resubmitted' ? 'resubmitted a rejected' : 'requested a new';
+    const actionText =
+      dto.action === 'resubmitted'
+        ? 'resubmitted a rejected'
+        : 'requested a new';
     const appName = dto.appName || dto.appId || 'FMT Software Solutions';
     const subject = `[${appName}] Sender ID Request: ${dto.senderId}`;
 
@@ -259,4 +361,3 @@ export class SmsService {
     }
   }
 }
-
