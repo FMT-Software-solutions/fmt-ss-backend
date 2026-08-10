@@ -32,11 +32,22 @@ export class VerifySmsPurchaseDto {
   @IsOptional()
   appName?: string;
 
-  @ApiProperty()
+  @ApiProperty({
+    required: false,
+    deprecated: true,
+    description: 'IGNORED. The charged amount is read from Paystack during verification.',
+  })
   @IsNumber()
-  amountGhs: number;
+  @IsOptional()
+  amountGhs?: number;
 
-  @ApiProperty()
+  @ApiProperty({
+    required: false,
+    deprecated: true,
+    description:
+      'IGNORED. Credits are derived server-side from the verified amount (see pricing.ts). Previously this value was granted verbatim, which let a tampered callback URL mint arbitrary credits.',
+  })
   @IsNumber()
-  creditsPurchased: number;
+  @IsOptional()
+  creditsPurchased?: number;
 }

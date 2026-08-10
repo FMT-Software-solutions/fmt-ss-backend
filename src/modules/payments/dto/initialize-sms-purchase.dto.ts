@@ -42,8 +42,13 @@ export class InitializeSmsPurchaseDto {
   @IsOptional()
   appName?: string;
 
-  @ApiProperty()
+  @ApiProperty({
+    required: false,
+    deprecated: true,
+    description:
+      'IGNORED. Credits are derived server-side from the amount Paystack confirms was charged (see pricing.ts). Accepted only so existing clients keep working.',
+  })
   @IsNumber()
-  @IsNotEmpty()
-  creditsPurchased: number;
+  @IsOptional()
+  creditsPurchased?: number;
 }

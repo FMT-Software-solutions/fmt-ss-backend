@@ -5,8 +5,11 @@ import { ValidationPipe } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
-  
+  // rawBody keeps the untouched request bytes available on req.rawBody, which
+  // the Paystack webhook needs: its x-paystack-signature is an HMAC over the
+  // exact payload sent, so a re-serialised JSON.stringify would never match.
+  const app = await NestFactory.create(AppModule, { rawBody: true });
+
   // Enable CORS
   app.enableCors();
   

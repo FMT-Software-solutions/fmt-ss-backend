@@ -42,8 +42,13 @@ export class InitializeStoragePurchaseDto {
   @IsOptional()
   appName?: string;
 
-  @ApiProperty({ description: 'Bytes of storage to grant on success' })
+  @ApiProperty({
+    required: false,
+    deprecated: true,
+    description:
+      'IGNORED. Bytes are derived server-side from the amount Paystack confirms was charged (see pricing.ts).',
+  })
   @IsNumber()
-  @IsNotEmpty()
-  bytesPurchased: number;
+  @IsOptional()
+  bytesPurchased?: number;
 }

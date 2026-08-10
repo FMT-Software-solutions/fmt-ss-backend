@@ -32,11 +32,21 @@ export class VerifyStoragePurchaseDto {
   @IsOptional()
   appName?: string;
 
-  @ApiProperty()
+  @ApiProperty({
+    required: false,
+    deprecated: true,
+    description: 'IGNORED. The charged amount is read from Paystack during verification.',
+  })
   @IsNumber()
-  amountGhs: number;
+  @IsOptional()
+  amountGhs?: number;
 
-  @ApiProperty({ description: 'Bytes of storage to grant on success' })
+  @ApiProperty({
+    required: false,
+    deprecated: true,
+    description: 'IGNORED. Bytes are derived server-side from the verified amount (see pricing.ts).',
+  })
   @IsNumber()
-  bytesPurchased: number;
+  @IsOptional()
+  bytesPurchased?: number;
 }
