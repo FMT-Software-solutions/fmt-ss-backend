@@ -39,6 +39,234 @@ export type Database = {
   }
   public: {
     Tables: {
+      page_views: {
+        Row: {
+          browser: string | null
+          country: string | null
+          device: string | null
+          id: number
+          lang: string | null
+          occurred_at: string
+          os: string | null
+          path: string
+          referrer_host: string | null
+          region: string | null
+          screen_w: number | null
+          session_id: string | null
+          utm_campaign: string | null
+          utm_medium: string | null
+          utm_source: string | null
+          visitor_hash: string | null
+        }
+        Insert: {
+          browser?: string | null
+          country?: string | null
+          device?: string | null
+          id?: never
+          lang?: string | null
+          occurred_at?: string
+          os?: string | null
+          path: string
+          referrer_host?: string | null
+          region?: string | null
+          screen_w?: number | null
+          session_id?: string | null
+          utm_campaign?: string | null
+          utm_medium?: string | null
+          utm_source?: string | null
+          visitor_hash?: string | null
+        }
+        Update: {
+          browser?: string | null
+          country?: string | null
+          device?: string | null
+          id?: never
+          lang?: string | null
+          occurred_at?: string
+          os?: string | null
+          path?: string
+          referrer_host?: string | null
+          region?: string | null
+          screen_w?: number | null
+          session_id?: string | null
+          utm_campaign?: string | null
+          utm_medium?: string | null
+          utm_source?: string | null
+          visitor_hash?: string | null
+        }
+        Relationships: []
+      }
+      analytics_daily: {
+        Row: {
+          country_json: Json
+          day: string
+          device_json: Json
+          path: string
+          referrer_json: Json
+          uniques: number
+          views: number
+        }
+        Insert: {
+          country_json?: Json
+          day: string
+          device_json?: Json
+          path: string
+          referrer_json?: Json
+          uniques?: number
+          views?: number
+        }
+        Update: {
+          country_json?: Json
+          day?: string
+          device_json?: Json
+          path?: string
+          referrer_json?: Json
+          uniques?: number
+          views?: number
+        }
+        Relationships: []
+      }
+      sms_balance_alerts: {
+        Row: {
+          alert_type: string
+          app_id: string | null
+          balance_at_alert: number | null
+          channel: string
+          created_at: string
+          error: string | null
+          id: number
+          organization_id: string | null
+          organization_name: string | null
+          recipient: string | null
+          succeeded: boolean
+          threshold: number | null
+          triggered_by: string
+        }
+        Insert: {
+          alert_type: string
+          app_id?: string | null
+          balance_at_alert?: number | null
+          channel?: string
+          created_at?: string
+          error?: string | null
+          id?: never
+          organization_id?: string | null
+          organization_name?: string | null
+          recipient?: string | null
+          succeeded?: boolean
+          threshold?: number | null
+          triggered_by?: string
+        }
+        Update: {
+          alert_type?: string
+          app_id?: string | null
+          balance_at_alert?: number | null
+          channel?: string
+          created_at?: string
+          error?: string | null
+          id?: never
+          organization_id?: string | null
+          organization_name?: string | null
+          recipient?: string | null
+          succeeded?: boolean
+          threshold?: number | null
+          triggered_by?: string
+        }
+        Relationships: []
+      }
+      app_default_templates: {
+        Row: {
+          app_id: string
+          created_at: string
+          id: string
+          is_active: boolean
+          kind: string
+          notes: string | null
+          payload: Json
+          updated_at: string
+          updated_by: string | null
+        }
+        Insert: {
+          app_id: string
+          created_at?: string
+          id?: string
+          is_active?: boolean
+          kind: string
+          notes?: string | null
+          payload?: Json
+          updated_at?: string
+          updated_by?: string | null
+        }
+        Update: {
+          app_id?: string
+          created_at?: string
+          id?: string
+          is_active?: boolean
+          kind?: string
+          notes?: string | null
+          payload?: Json
+          updated_at?: string
+          updated_by?: string | null
+        }
+        Relationships: []
+      }
+      admin_audit_log: {
+        Row: {
+          action: string
+          actor_email: string | null
+          actor_id: string | null
+          app_id: string | null
+          created_at: string
+          details: Json | null
+          id: number
+          organization_id: string | null
+          summary: string | null
+          target_id: string | null
+        }
+        Insert: {
+          action: string
+          actor_email?: string | null
+          actor_id?: string | null
+          app_id?: string | null
+          created_at?: string
+          details?: Json | null
+          id?: never
+          organization_id?: string | null
+          summary?: string | null
+          target_id?: string | null
+        }
+        Update: {
+          action?: string
+          actor_email?: string | null
+          actor_id?: string | null
+          app_id?: string | null
+          created_at?: string
+          details?: Json | null
+          id?: never
+          organization_id?: string | null
+          summary?: string | null
+          target_id?: string | null
+        }
+        Relationships: []
+      }
+      admin_otp_requests: {
+        Row: {
+          email: string
+          last_request_at: string | null
+          requests_count: number
+        }
+        Insert: {
+          email: string
+          last_request_at?: string | null
+          requests_count?: number
+        }
+        Update: {
+          email?: string
+          last_request_at?: string | null
+          requests_count?: number
+        }
+        Relationships: []
+      }
       quotes: {
         Row: {
           budget: string
@@ -280,29 +508,35 @@ export type Database = {
       }
       messages: {
         Row: {
+          archived_at: string | null
           created_at: string
           email: string | null
           id: string
           message: string | null
           name: string | null
+          read_at: string | null
           status: string | null
           updated_at: string | null
         }
         Insert: {
+          archived_at?: string | null
           created_at?: string
           email?: string | null
           id?: string
           message?: string | null
           name?: string | null
+          read_at?: string | null
           status?: string | null
           updated_at?: string | null
         }
         Update: {
+          archived_at?: string | null
           created_at?: string
           email?: string | null
           id?: string
           message?: string | null
           name?: string | null
+          read_at?: string | null
           status?: string | null
           updated_at?: string | null
         }

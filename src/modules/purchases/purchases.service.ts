@@ -111,8 +111,10 @@ export class PurchasesService {
               : ''
           },
           userDetails: {
-            firstName: 'Admin',
-            lastName: 'User',
+            // The edge functions reject blank names, so fall back only when
+            // the buyer gave none.
+            firstName: billingDetails.firstName?.trim() || 'Admin',
+            lastName: billingDetails.lastName?.trim() || 'User',
             email: userEmail,
             password: userPassword,
           },
@@ -786,8 +788,10 @@ export class PurchasesService {
     billingDetails: BillingDetailsDto;
     appProvisioningDetails: Record<string, any>;
     mode?: 'buy' | 'trial' | 'free';
+    /** Scopes the result to one purchase; without it every purchase for the organization is stamped. */
+    purchaseId?: string;
   }) {
-    const { organizationId, billingDetails, appProvisioningDetails, mode } = payload;
+    const { organizationId, billingDetails, appProvisioningDetails, mode, purchaseId } = payload;
 
     if (!organizationId || !billingDetails || !appProvisioningDetails) {
       throw new BadRequestException('Missing required fields');
@@ -805,13 +809,18 @@ export class PurchasesService {
 
     const adminSupabase: any = this.supabaseService.getServiceRoleClient();
 
-    await adminSupabase
+    const stampQuery = adminSupabase
       .from('purchases')
       .update({
         confirmation_email_details: emailConfirmationDetails,
         updated_at: new Date().toISOString()
-      })
-      .eq('organization_id', organizationId);
+      });
+
+    // Prefer the specific purchase when the caller knows it; otherwise fall
+    // back to the organization-wide update this has always done.
+    await (purchaseId
+      ? stampQuery.eq('id', purchaseId)
+      : stampQuery.eq('organization_id', organizationId));
 
     const successful = results.filter(r => r.success);
     const failed = results.filter(r => !r.success);

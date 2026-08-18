@@ -1,11 +1,14 @@
 import { Controller, Post, Body, UseGuards, BadRequestException, InternalServerErrorException, Get } from '@nestjs/common';
-import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
+import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth } from '@nestjs/swagger';
 import { ThrottlerGuard } from '@nestjs/throttler';
+import { AdminAuthGuard } from '../../common/auth/admin-auth.guard';
 import { PurchasesService } from '../purchases/purchases.service';
 import { IssuesService } from '../issues/issues.service';
 import { ManualPurchaseDto, AppProvisioningDto, ConfirmationEmailDto } from '../purchases/dto/purchase.dto';
 
 @ApiTags('Admin')
+@ApiBearerAuth()
+@UseGuards(AdminAuthGuard)
 @Controller('admin')
 export class AdminController {
   constructor(
@@ -21,7 +24,7 @@ export class AdminController {
   }
 
   @Post('manual-purchases/create')
-  @UseGuards(ThrottlerGuard) // Should probably also have AuthGuard here!
+  @UseGuards(ThrottlerGuard)
   @ApiOperation({ summary: 'Create a manual purchase' })
   @ApiResponse({ status: 201, description: 'Purchase created successfully' })
   @ApiResponse({ status: 400, description: 'Bad Request' })

@@ -1,7 +1,7 @@
 import { Injectable, NotFoundException, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
-import { AppConfig, getRegisteredApps } from './apps.config';
+import { AppConfig, PublicAppConfig, getRegisteredApps } from './apps.config';
 
 @Injectable()
 export class AppsService {
@@ -46,5 +46,25 @@ export class AppsService {
 
   getAllApps(): AppConfig[] {
     return Array.from(this.configs.values());
+  }
+
+  /** True when the app has usable Supabase credentials. */
+  isConfigured(appId: string): boolean {
+    return this.clients.has(appId);
+  }
+
+  /**
+   * Registry for the admin client. Supabase URLs and service-role keys are
+   * deliberately dropped — the browser must never receive them.
+   */
+  getPublicRegistry(): PublicAppConfig[] {
+    return this.getAllApps().map(({ id, name, slug, description, capabilities }) => ({
+      id,
+      name,
+      slug,
+      description,
+      capabilities,
+      configured: this.isConfigured(id),
+    }));
   }
 }
