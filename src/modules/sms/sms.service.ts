@@ -103,8 +103,12 @@ export class SmsService {
     const publicApiUrl = this.configService.get<string>('PUBLIC_API_URL');
     let callbackUrl: string | undefined;
     if (dto.messageRef && publicApiUrl && dto.appId) {
+      // Tolerate PUBLIC_API_URL given with or without a /api suffix: the path
+      // below already includes it, and a doubled /api/api 404s silently, so
+      // delivery receipts would simply never arrive.
+      const apiOrigin = publicApiUrl.replace(/\/+$/, '').replace(/\/api$/, '');
       callbackUrl =
-        `${publicApiUrl.replace(/\/$/, '')}/api/sms/webhook/arkesel` +
+        `${apiOrigin}/api/sms/webhook/arkesel` +
         `?ref=${encodeURIComponent(dto.messageRef)}&app_id=${encodeURIComponent(dto.appId)}`;
     }
 
