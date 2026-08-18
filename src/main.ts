@@ -47,9 +47,15 @@ async function bootstrap() {
   }));
 
   // Swagger: not exposed in production unless explicitly enabled.
+  // An explicit SWAGGER_ENABLED always wins. Deriving it from NODE_ENV as a
+  // fallback is only safe when nothing was set: hosts like Railway do not
+  // define NODE_ENV by default, so an OR here would treat 'false' as 'true'
+  // and publish the docs anyway.
+  const swaggerFlag = configService.get<string>('SWAGGER_ENABLED');
   const swaggerEnabled =
-    configService.get<string>('SWAGGER_ENABLED') === 'true' ||
-    configService.get<string>('NODE_ENV') !== 'production';
+    swaggerFlag !== undefined && swaggerFlag !== ''
+      ? swaggerFlag === 'true'
+      : configService.get<string>('NODE_ENV') !== 'production';
   if (swaggerEnabled) {
     const config = new DocumentBuilder()
       .setTitle('FMT Software Solutions API')
