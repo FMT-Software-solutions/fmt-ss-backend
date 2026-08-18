@@ -5,7 +5,6 @@ import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { ValidationPipe } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import helmet from 'helmet';
-import { json } from 'express';
 
 async function bootstrap() {
   // rawBody keeps the untouched request bytes available on req.rawBody, which
@@ -33,8 +32,12 @@ async function bootstrap() {
 
   // The analytics beacon uses navigator.sendBeacon, which cannot perform a
   // CORS preflight, so it must send a safelisted content type (text/plain).
-  // Parse that one route's body as JSON whatever the declared type.
-  app.use('/api/analytics/collect', json({ type: () => true }));
+  //
+  // This replaces Nest's own JSON parser rather than adding a second one at a
+  // path: mounting an extra body parser via app.use() displaced the built-in
+  // one and left req.body empty on *every* route, so all POST validation
+  // failed with "should not be empty" for fields that had been sent.
+  app.useBodyParser('json', { type: ['application/json', 'text/plain'] });
 
   // Set Global Prefix
   app.setGlobalPrefix('api');
