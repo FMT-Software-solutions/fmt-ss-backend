@@ -1,7 +1,7 @@
 import { IsArray, IsIn, IsObject, IsOptional, IsString, MaxLength } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
-const KINDS = ['branding', 'roles', 'organization_settings'] as const;
+const KINDS = ['branding', 'roles', 'organization_settings', 'services'] as const;
 
 export class UpsertTemplateDto {
   @ApiProperty({ enum: KINDS })

@@ -17,6 +17,8 @@ export interface AppCapabilities {
     hasSmsDeliveryTracking: boolean;
     /** organizations.ai_daily_limit (absent on church-hub). */
     hasAiDailyLimit: boolean;
+    /** service_categories + services catalogue (print-calc-pro only). */
+    hasServiceCatalog: boolean;
     /** Role values when roles are static rather than table-driven. */
     staticRoles?: string[];
     /** Column holding a per-member permission override, if any. */
@@ -57,6 +59,7 @@ export const getRegisteredApps = (configService: ConfigService): AppConfig[] => 
                 hasWelcomeCredits: false,
                 hasSmsDeliveryTracking: false,
                 hasAiDailyLimit: false,
+                hasServiceCatalog: false,
                 staticRoles: ['owner', 'admin', 'branch_admin', 'finance_admin', 'write', 'read'],
                 membershipOverrideColumn: 'visibility_overrides',
                 membershipFlags: ['can_create_users', 'can_approve_requests'],
@@ -77,6 +80,7 @@ export const getRegisteredApps = (configService: ConfigService): AppConfig[] => 
                 hasWelcomeCredits: false,
                 hasSmsDeliveryTracking: false,
                 hasAiDailyLimit: true,
+                hasServiceCatalog: false,
                 membershipOverrideColumn: 'permissions',
             },
         },
@@ -95,6 +99,7 @@ export const getRegisteredApps = (configService: ConfigService): AppConfig[] => 
                 hasWelcomeCredits: true,
                 hasSmsDeliveryTracking: true,
                 hasAiDailyLimit: true,
+                hasServiceCatalog: true,
             },
         },
     ];

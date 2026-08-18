@@ -10,7 +10,11 @@ import { AppsService } from '../../apps/apps.service';
 import { SupabaseService } from '../../../common/supabase/supabase.service';
 import { AdminAuditService } from '../audit/admin-audit.service';
 
-export type TemplateKind = 'branding' | 'roles' | 'organization_settings';
+export type TemplateKind =
+  | 'branding'
+  | 'roles'
+  | 'organization_settings'
+  | 'services';
 
 /** Organization columns the branding template owns. */
 const BRANDING_FIELDS = [
@@ -28,6 +32,24 @@ interface RoleTemplateEntry {
   type?: string | null;
   description?: string | null;
   permissions?: unknown;
+}
+
+/** A service catalogue category with the services that belong to it. */
+interface ServiceCategoryTemplate {
+  name: string;
+  description?: string | null;
+  pricing_strategy?: string | null;
+  sort_order?: number | null;
+  requires_production?: boolean | null;
+  services?: {
+    name: string;
+    description?: string | null;
+    pricing_strategy?: string | null;
+    unit_price?: number | null;
+    min_quantity?: number | null;
+    sort_order?: number | null;
+    requires_production?: boolean | null;
+  }[];
 }
 
 /** Deep equality that ignores key order, which JSON columns do not preserve. */
@@ -176,6 +198,16 @@ export class AdminDefaultsService {
     }
 
     const capabilities = this.appsService.getAppConfig(appId).capabilities;
+
+    if (kind === 'services') {
+      if (!capabilities.hasServiceCatalog) {
+        throw new BadRequestException(
+          `${this.appsService.getAppConfig(appId).name} does not have a service catalogue`,
+        );
+      }
+      return { categories: await this.readServiceCatalog(client, orgId) };
+    }
+
     if (!capabilities.hasDynamicRoles) {
       throw new BadRequestException(
         `${this.appsService.getAppConfig(appId).name} does not use a roles table`,
@@ -200,6 +232,61 @@ export class AdminDefaultsService {
         permissions: parsePermissions(role.permissions),
       })),
     };
+  }
+
+  /**
+   * Reads an organization's service catalogue as nested categories. Services
+   * are grouped under their category by name rather than id, so the template
+   * can be applied to a different organization.
+   */
+  private async readServiceCatalog(
+    client: SupabaseClient,
+    orgId: string,
+  ): Promise<ServiceCategoryTemplate[]> {
+    const [categories, services] = await Promise.all([
+      client
+        .from('service_categories')
+        .select('id, name, description, pricing_strategy, sort_order, requires_production')
+        .eq('organization_id', orgId)
+        .order('sort_order', { ascending: true }),
+      client
+        .from('services')
+        .select(
+          'category_id, name, description, pricing_strategy, unit_price, min_quantity, sort_order, requires_production',
+        )
+        .eq('organization_id', orgId)
+        .order('sort_order', { ascending: true }),
+    ]);
+
+    if (categories.error) {
+      throw new InternalServerErrorException(
+        `Failed to read service categories: ${categories.error.message}`,
+      );
+    }
+    if (services.error) {
+      throw new InternalServerErrorException(
+        `Failed to read services: ${services.error.message}`,
+      );
+    }
+
+    const byCategory = new Map<string, ServiceCategoryTemplate['services']>();
+    for (const service of services.data ?? []) {
+      const list = byCategory.get(service.category_id) ?? [];
+      const { category_id: _ignored, ...rest } = service as Record<string, unknown> & {
+        category_id: string;
+      };
+      list.push(rest as NonNullable<ServiceCategoryTemplate['services']>[number]);
+      byCategory.set(service.category_id, list);
+    }
+
+    return (categories.data ?? []).map((category) => ({
+      name: category.name,
+      description: category.description,
+      pricing_strategy: category.pricing_strategy,
+      sort_order: category.sort_order,
+      requires_production: category.requires_production,
+      services: byCategory.get(category.id) ?? [],
+    }));
   }
 
   /**
@@ -271,6 +358,38 @@ export class AdminDefaultsService {
                 current: parsePermissions(current.permissions),
                 expected: expected.permissions,
               };
+          })
+          .filter(Boolean) as { field: string; current: unknown; expected: unknown }[];
+
+        checks.push({ kind, inSync: differences.length === 0, differences });
+      }
+
+      if (kind === 'services') {
+        const expected = (payload.categories ?? []) as ServiceCategoryTemplate[];
+        const current = await this.readServiceCatalog(client, orgId);
+        const currentByName = new Map(current.map((category) => [category.name, category]));
+
+        const differences = expected
+          .map((category) => {
+            const existing = currentByName.get(category.name);
+            if (!existing) {
+              return {
+                field: `category:${category.name}`,
+                current: null,
+                expected: `${category.services?.length ?? 0} service(s)`,
+              };
+            }
+            // Report only missing services; prices an organization has edited
+            // are theirs to keep.
+            const have = new Set((existing.services ?? []).map((s) => s.name));
+            const missing = (category.services ?? []).filter((s) => !have.has(s.name));
+            return missing.length
+              ? {
+                field: `category:${category.name}`,
+                current: `${existing.services?.length ?? 0} service(s)`,
+                expected: `missing ${missing.length}: ${missing.map((s) => s.name).join(', ')}`,
+              }
+              : null;
           })
           .filter(Boolean) as { field: string; current: unknown; expected: unknown }[];
 
@@ -374,6 +493,73 @@ export class AdminDefaultsService {
               });
 
             if (error) throw new Error(`${role.name}: ${error.message}`);
+          }
+          applied.push(kind);
+        }
+
+        if (kind === 'services') {
+          const categories = (payload.categories ?? []) as ServiceCategoryTemplate[];
+          if (!categories.length) continue;
+
+          for (const category of categories) {
+            // Reuse the category if it already exists; an organization may have
+            // renamed prices but kept the category.
+            const { data: existingCategory } = await client
+              .from('service_categories')
+              .select('id')
+              .eq('organization_id', orgId)
+              .eq('name', category.name)
+              .maybeSingle();
+
+            let categoryId = existingCategory?.id as string | undefined;
+
+            if (!categoryId) {
+              const { data: created, error } = await client
+                .from('service_categories')
+                .insert({
+                  organization_id: orgId,
+                  name: category.name,
+                  description: category.description ?? null,
+                  pricing_strategy: category.pricing_strategy ?? 'flat_rate',
+                  sort_order: category.sort_order ?? 0,
+                  requires_production: category.requires_production ?? false,
+                })
+                .select('id')
+                .single();
+              if (error) throw new Error(`category ${category.name}: ${error.message}`);
+              categoryId = created.id;
+            }
+
+            const services = category.services ?? [];
+            if (!services.length) continue;
+
+            // Only add what is missing. Prices the organization has adjusted
+            // must not be reset by re-applying the template.
+            const { data: existingServices } = await client
+              .from('services')
+              .select('name')
+              .eq('organization_id', orgId)
+              .eq('category_id', categoryId);
+            const have = new Set((existingServices ?? []).map((s) => s.name));
+
+            const toInsert = services
+              .filter((service) => !have.has(service.name))
+              .map((service) => ({
+                organization_id: orgId,
+                category_id: categoryId,
+                name: service.name,
+                description: service.description ?? null,
+                pricing_strategy: service.pricing_strategy ?? category.pricing_strategy ?? 'flat_rate',
+                unit_price: service.unit_price ?? 0,
+                min_quantity: service.min_quantity ?? 1,
+                sort_order: service.sort_order ?? 0,
+                requires_production: service.requires_production ?? false,
+              }));
+
+            if (toInsert.length) {
+              const { error } = await client.from('services').insert(toInsert);
+              if (error) throw new Error(`services in ${category.name}: ${error.message}`);
+            }
           }
           applied.push(kind);
         }
