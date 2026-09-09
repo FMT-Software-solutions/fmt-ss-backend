@@ -86,6 +86,33 @@ export const getRegisteredApps = (configService: ConfigService): AppConfig[] => 
         },
 
         {
+            id: 'kobox',
+            name: 'Kobox',
+            slug: 'kobox',
+            description: 'Group contributions, dues, welfare and susu',
+            envPrefix: 'KOBOX_',
+            supabaseUrl: configService.get<string>('KOBOX_SUPABASE_URL') || '',
+            supabaseServiceRoleKey: configService.get<string>('KOBOX_SUPABASE_SECRET_KEY') || '',
+            capabilities: {
+                // Kobox has no `organizations` TABLE: a group IS the organization,
+                // so every `organizationId` this backend receives from it — on
+                // /sms/send, on a purchase, on the Paystack webhook — is a
+                // `groups.id`. Its database exposes an `organizations` VIEW over
+                // `groups` so the admin console's cross-app queries (which select
+                // id, name, email, phone, is_active) keep working unchanged.
+                hasDynamicRoles: false,
+                hasSubApps: false,
+                hasWelcomeCredits: false,
+                // `record_sms_delivery` maps a delivery receipt back onto the
+                // notification outbox row it was sent from.
+                hasSmsDeliveryTracking: true,
+                hasAiDailyLimit: false,
+                hasServiceCatalog: false,
+                staticRoles: ['owner', 'admin', 'treasurer', 'auditor', 'member'],
+            },
+        },
+
+        {
             id: 'print-calc-pro',
             name: 'Print Suite Pro',
             slug: 'print-calc-pro',
