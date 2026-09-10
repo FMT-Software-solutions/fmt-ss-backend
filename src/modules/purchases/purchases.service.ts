@@ -151,7 +151,9 @@ export class PurchasesService {
               statusCode: response.status
             }
           });
-          results.push({ productId, success: false, error: `Edge function failed: ${response.status}` });
+          // Surface the function's own message so the admin sees why, not just the status.
+          const reason = typeof responseData?.error === 'string' ? `: ${responseData.error}` : '';
+          results.push({ productId, success: false, error: `Edge function failed (${response.status})${reason}` });
           continue;
         }
 
