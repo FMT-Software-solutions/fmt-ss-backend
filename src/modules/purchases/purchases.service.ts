@@ -631,6 +631,68 @@ export class PurchasesService {
     };
   }
 
+  /**
+   * Records the organization's access to each provisioned app. Best-effort:
+   * provisioning has already succeeded by now, so a failure is logged rather
+   * than thrown. A trial never overwrites access that is already active.
+   */
+  async recordAppAccess(
+    organizationId: string,
+    productIds: string[],
+    mode: 'buy' | 'trial' | 'free',
+  ): Promise<{ recorded: string[]; skipped: string[]; error?: string }> {
+    if (productIds.length === 0) return { recorded: [], skipped: [] };
+    const adminSupabase: any = this.supabaseService.getServiceRoleClient();
+
+    let targets = productIds;
+    let skipped: string[] = [];
+    if (mode === 'trial') {
+      const { data: existing } = await adminSupabase
+        .from('organization_apps')
+        .select('app_id, status')
+        .eq('organization_id', organizationId)
+        .in('app_id', productIds);
+      const active = new Set(
+        (existing ?? [])
+          .filter((row: { status: string }) => row.status === 'active')
+          .map((row: { app_id: string }) => row.app_id),
+      );
+      skipped = productIds.filter((productId) => active.has(productId));
+      targets = productIds.filter((productId) => !active.has(productId));
+    }
+    if (targets.length === 0) return { recorded: [], skipped };
+
+    const now = new Date().toISOString();
+    const { error } = await adminSupabase
+      .from('organization_apps')
+      .upsert(
+        targets.map((productId) => ({
+          organization_id: organizationId,
+          app_id: productId,
+          status: mode === 'trial' ? 'trial' : 'active',
+          plan_type: mode === 'buy' ? 'paid' : mode,
+          access_granted_at: now,
+          updated_at: now,
+        })),
+        { onConflict: 'organization_id, app_id' },
+      );
+
+    if (error) {
+      console.error(`Failed to record ${mode} access for org ${organizationId}:`, error);
+      await this.logPurchaseIssue({
+        title: 'Failed to record app access',
+        description: `Failed to upsert organization_apps records after provisioning (${mode})`,
+        errorMessage: error.message,
+        organizationId,
+        severity: 'medium',
+        metadata: { productIds: targets, mode },
+      });
+      return { recorded: [], skipped, error: error.message };
+    }
+
+    return { recorded: targets, skipped };
+  }
+
   async logPurchaseIssue(params: {
     title: string;
     description: string;

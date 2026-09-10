@@ -249,6 +249,14 @@ export class AdminProvisioningService {
       purchaseId: payload.purchaseId,
     });
 
+    // Only apps that actually provisioned get an entitlement; a failed app is
+    // retried later and recorded then.
+    const access = await this.purchasesService.recordAppAccess(
+      payload.organizationId,
+      result.results.map((entry) => entry.productId),
+      payload.mode ?? 'buy',
+    );
+
     // The edge functions and seed triggers carry their own hardcoded defaults,
     // which drift from what the app currently expects. Re-apply the canonical
     // templates so a freshly provisioned organization is correct regardless.
@@ -268,11 +276,12 @@ export class AdminProvisioningService {
         apps: provisioningApps.map((app) => app.title),
         summary: result.summary,
         errors: result.errors,
+        access,
         defaultsApplied,
       },
     });
 
-    return { ...result, defaultsApplied };
+    return { ...result, access, defaultsApplied };
   }
 
   /**
