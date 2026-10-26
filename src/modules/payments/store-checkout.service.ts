@@ -148,9 +148,8 @@ export class StoreCheckoutService {
     });
 
     if (dto.provider === 'paystack') {
-      const publicKey = this.configService.get<string>('PAYSTACK_PUBLIC_KEY');
-      if (!publicKey) throw new InternalServerErrorException('Paystack is not configured');
-      return { provider: 'paystack' as const, reference, amount: total, currency: 'GHS', email: billing.organizationEmail, publicKey, items };
+      // The popup uses the website's own public key; the server only needs the secret key to verify.
+      return { provider: 'paystack' as const, reference, amount: total, currency: 'GHS', email: billing.organizationEmail, items };
     }
 
     const checkoutUrl = await this.initiateHubtel(reference, total, items, billing);
