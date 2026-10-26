@@ -15,8 +15,8 @@ import { ThrottlerGuard } from '@nestjs/throttler';
 import type { RawBodyRequest } from '@nestjs/common';
 import type { Request } from 'express';
 import { PaymentsService } from './payments.service';
-import { HubtelCheckoutRequestDto, HubtelConfigRequestDto, HubtelStatusRequestDto } from './dto/hubtel.dto';
-import { PaystackCheckoutDto, PaystackInitializeDto } from './dto/paystack.dto';
+import { StoreCheckoutService } from './store-checkout.service';
+import { ConfirmStoreOrderDto, CreateStoreOrderDto } from './dto/store-order.dto';
 import { VerifySmsPurchaseDto } from './dto/verify-sms-purchase.dto';
 import { InitializeSmsPurchaseDto } from './dto/initialize-sms-purchase.dto';
 import { InitializeStoragePurchaseDto } from './dto/initialize-storage-purchase.dto';
@@ -25,48 +25,53 @@ import { VerifyStoragePurchaseDto } from './dto/verify-storage-purchase.dto';
 @ApiTags('Payments')
 @Controller('payments')
 export class PaymentsController {
-    constructor(private readonly paymentsService: PaymentsService) { }
+    constructor(
+        private readonly paymentsService: PaymentsService,
+        private readonly storeCheckout: StoreCheckoutService,
+    ) { }
 
-    @Post('hubtel/config')
-    @ApiOperation({ summary: 'Get Hubtel payment configuration' })
-    handleHubtelConfig(@Body() payload: HubtelConfigRequestDto) {
-        return this.paymentsService.handleHubtelConfig(payload);
-    }
+    // ---------------------------------------------------------------- store
+    // Website orders. The server prices the order and issues the reference;
+    // every confirmation path asks the provider and checks the amount.
 
-    @Post('hubtel/status')
-    @ApiOperation({ summary: 'Check Hubtel payment status' })
-    handleHubtelStatus(@Body() payload: HubtelStatusRequestDto) {
-        return this.paymentsService.handleHubtelStatus(payload);
-    }
-
-    @Post('hubtel/checkout')
+    @Post('orders')
     @UseGuards(ThrottlerGuard)
-    @ApiOperation({ summary: 'Record Hubtel checkout' })
-    @ApiResponse({ status: 201, description: 'Purchase recorded' })
-    @ApiResponse({ status: 400, description: 'Bad Request' })
-    handleHubtelCheckout(@Body() payload: HubtelCheckoutRequestDto) {
-        return this.paymentsService.handleHubtelCheckout(payload);
+    @ApiOperation({ summary: 'Start a website order (server-priced)' })
+    createStoreOrder(@Body() payload: CreateStoreOrderDto) {
+        return this.storeCheckout.createOrder(payload);
     }
 
-    @Post('hubtel/callback')
-    @ApiOperation({ summary: 'Handle Hubtel callback' })
-    handleHubtelCallback(@Body() payload: any) {
-        return this.paymentsService.handleHubtelCallback(payload);
-    }
-
-    @Post('paystack/config')
-    @ApiOperation({ summary: 'Get Paystack payment configuration' })
-    handlePaystackConfig(@Body() payload: PaystackInitializeDto) {
-        return this.paymentsService.handlePaystackInitialize(payload);
+    @Get('orders/:reference')
+    @UseGuards(ThrottlerGuard)
+    @ApiOperation({ summary: 'Order status; re-checks pending orders with the provider' })
+    getStoreOrder(@Param() params: ConfirmStoreOrderDto) {
+        return this.storeCheckout.pollOrder(params.reference);
     }
 
     @Post('paystack/checkout')
     @UseGuards(ThrottlerGuard)
-    @ApiOperation({ summary: 'Record Paystack checkout' })
-    @ApiResponse({ status: 201, description: 'Purchase recorded' })
-    @ApiResponse({ status: 400, description: 'Bad Request' })
-    handlePaystackCheckout(@Body() payload: PaystackCheckoutDto) {
-        return this.paymentsService.handlePaystackCheckout(payload);
+    @ApiOperation({ summary: 'Confirm a Paystack website order by reference' })
+    confirmPaystackOrder(@Body() payload: ConfirmStoreOrderDto) {
+        return this.storeCheckout.confirmPaystack(payload.reference);
+    }
+
+    /**
+     * Hubtel server callback. The payload is only used to find the
+     * reference; payment is confirmed by asking Hubtel's status API.
+     */
+    @Post('hubtel/callback')
+    @ApiExcludeEndpoint()
+    async handleHubtelCallback(@Body() payload: any) {
+        const reference = payload?.Data?.ClientReference ?? payload?.data?.clientReference ?? payload?.ClientReference;
+        if (typeof reference !== 'string' || !(await this.storeCheckout.isStoreReference(reference))) {
+            return { received: true, handled: false };
+        }
+        try {
+            const order = await this.storeCheckout.confirmHubtel(reference);
+            return { received: true, handled: true, status: order.status };
+        } catch (error) {
+            return { received: true, handled: false, error: (error as Error).message };
+        }
     }
 
     @Post('initialize-sms-purchase')
@@ -130,6 +135,16 @@ export class PaymentsController {
             // 400, not 200: an unsigned caller is not Paystack, and we do not
             // want to pretend we accepted it.
             throw new BadRequestException('Invalid signature');
+        }
+
+        const reference = req.body?.data?.reference;
+        if (req.body?.event === 'charge.success' && typeof reference === 'string' && (await this.storeCheckout.isStoreReference(reference))) {
+            try {
+                const order = await this.storeCheckout.confirmPaystack(reference);
+                return { received: true, handled: true, status: order.status };
+            } catch (error) {
+                return { received: true, handled: false, error: (error as Error).message };
+            }
         }
 
         return this.paymentsService.handlePaystackWebhook(req.body);
