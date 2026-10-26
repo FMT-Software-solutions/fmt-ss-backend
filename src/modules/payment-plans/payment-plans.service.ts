@@ -154,6 +154,9 @@ export class PaymentPlansService {
   async createRequest(dto: CreatePlanRequestDto) {
     const { contact, contact_type } = parseContact(dto.contact);
     const app = await this.publishedApp(dto.appId);
+    if (app.paymentPlans?.enabled === false) {
+      throw new BadRequestException(`${app.title} is not offered in instalments`);
+    }
 
     // A second click shouldn't make a second request.
     const { data: open } = await this.db
@@ -213,18 +216,36 @@ export class PaymentPlansService {
 
   private async publishedApp(appId: string) {
     const app = await this.sanity.fetch<any>(
-      `*[_type == "premiumApp" && _id == $id && isPublished == true][0]{ _id, title, price, isFree, promotion }`,
+      `*[_type == "premiumApp" && _id == $id && isPublished == true][0]{ _id, title, price, isFree, promotion, paymentPlans }`,
       { id: appId },
     );
     if (!app) throw new BadRequestException('This app is not available');
     if (app.isFree) throw new BadRequestException(`${app.title} is free`);
-    return app as { _id: string; title: string; price?: number; isFree?: boolean; promotion?: any };
+    return app as {
+      _id: string;
+      title: string;
+      price?: number;
+      isFree?: boolean;
+      promotion?: any;
+      paymentPlans?: { enabled?: boolean; minDepositPercent?: number; maxInstalments?: number; surchargePercent?: number };
+    };
   }
 
-  /** Current price for the create form. */
+  /** Current price and the app's instalment defaults (Sanity) for the create form. */
   async quote(appId: string) {
     const app = await this.publishedApp(appId);
-    return { appId: app._id, title: app.title, listPrice: Number(app.price ?? 0), price: effectivePrice(app) };
+    const settings = app.paymentPlans ?? {};
+    return {
+      appId: app._id,
+      title: app.title,
+      listPrice: Number(app.price ?? 0),
+      price: effectivePrice(app),
+      defaults: {
+        depositPercent: settings.minDepositPercent ?? 30,
+        count: settings.maxInstalments ?? 3,
+        surchargePercent: settings.surchargePercent ?? 0,
+      },
+    };
   }
 
   async createPlan(dto: CreatePlanDto, actor?: User) {
