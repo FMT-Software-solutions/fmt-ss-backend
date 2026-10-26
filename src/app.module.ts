@@ -15,6 +15,7 @@ import { PurchasesModule } from './modules/purchases/purchases.module';
 import { IssuesModule } from './modules/issues/issues.module';
 import { AdminModule } from './modules/admin/admin.module';
 import { PaymentsModule } from './modules/payments/payments.module';
+import { PaymentPlansModule } from './modules/payment-plans/payment-plans.module';
 import { FilesModule } from './modules/files/files.module';
 import { StorageModule } from './modules/storage/storage.module';
 import { TestimonialsModule } from './modules/testimonials/testimonials.module';
@@ -46,6 +47,7 @@ import { AnalyticsModule } from './modules/analytics/analytics.module';
     IssuesModule,
     AdminModule,
     PaymentsModule,
+    PaymentPlansModule,
     FilesModule,
     StorageModule,
     TestimonialsModule,

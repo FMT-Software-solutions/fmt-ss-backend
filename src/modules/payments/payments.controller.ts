@@ -16,6 +16,7 @@ import type { RawBodyRequest } from '@nestjs/common';
 import type { Request } from 'express';
 import { PaymentsService } from './payments.service';
 import { StoreCheckoutService } from './store-checkout.service';
+import { PaymentPlansService } from '../payment-plans/payment-plans.service';
 import { ConfirmStoreOrderDto, CreateStoreOrderDto } from './dto/store-order.dto';
 import { VerifySmsPurchaseDto } from './dto/verify-sms-purchase.dto';
 import { InitializeSmsPurchaseDto } from './dto/initialize-sms-purchase.dto';
@@ -28,6 +29,7 @@ export class PaymentsController {
     constructor(
         private readonly paymentsService: PaymentsService,
         private readonly storeCheckout: StoreCheckoutService,
+        private readonly paymentPlans: PaymentPlansService,
     ) { }
 
     // ---------------------------------------------------------------- store
@@ -63,6 +65,14 @@ export class PaymentsController {
     @ApiExcludeEndpoint()
     async handleHubtelCallback(@Body() payload: any) {
         const reference = payload?.Data?.ClientReference ?? payload?.data?.clientReference ?? payload?.ClientReference;
+        if (typeof reference === 'string' && this.paymentPlans.isPlanReference(reference)) {
+            try {
+                const payment = await this.paymentPlans.confirmPayment(reference);
+                return { received: true, handled: true, status: payment.status };
+            } catch (error) {
+                return { received: true, handled: false, error: (error as Error).message };
+            }
+        }
         if (typeof reference !== 'string' || !(await this.storeCheckout.isStoreReference(reference))) {
             return { received: true, handled: false };
         }
@@ -138,6 +148,14 @@ export class PaymentsController {
         }
 
         const reference = req.body?.data?.reference;
+        if (req.body?.event === 'charge.success' && typeof reference === 'string' && this.paymentPlans.isPlanReference(reference)) {
+            try {
+                const payment = await this.paymentPlans.confirmPayment(reference);
+                return { received: true, handled: true, status: payment.status };
+            } catch (error) {
+                return { received: true, handled: false, error: (error as Error).message };
+            }
+        }
         if (req.body?.event === 'charge.success' && typeof reference === 'string' && (await this.storeCheckout.isStoreReference(reference))) {
             try {
                 const order = await this.storeCheckout.confirmPaystack(reference);

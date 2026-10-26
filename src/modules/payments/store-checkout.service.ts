@@ -5,7 +5,6 @@ import {
   Logger,
   NotFoundException,
 } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
 import { randomBytes } from 'crypto';
 import { SupabaseService } from '../../common/supabase/supabase.service';
 import { SanityService } from '../../common/sanity/sanity.service';
@@ -13,6 +12,7 @@ import { IssuesService } from '../issues/issues.service';
 import { PurchasesService } from '../purchases/purchases.service';
 import type { BillingDetailsDto } from '../purchases/dto/purchase.dto';
 import type { CreateStoreOrderDto } from './dto/store-order.dto';
+import { PaymentProvidersService, type ProviderConfirmation } from '../../common/payment-providers/payment-providers.service';
 
 /**
  * Website (marketplace) orders.
@@ -54,23 +54,8 @@ export interface PricedItem {
   product: { slug?: string; title: string };
 }
 
-type ProviderConfirmation = {
-  paid: boolean;
-  amountGhs: number;
-  method?: string;
-  externalId?: string;
-  raw: unknown;
-};
-
 const round2 = (n: number) => Math.round(n * 100) / 100;
 
-/** Hubtel wants 233XXXXXXXXX. */
-const toHubtelMsisdn = (phone?: string) => {
-  const digits = (phone ?? '').replace(/\D/g, '');
-  if (digits.length === 10 && digits.startsWith('0')) return `233${digits.slice(1)}`;
-  if (digits.length === 9) return `233${digits}`;
-  return digits || undefined;
-};
 
 /** A promotion counts only while it is switched on and inside its dates. */
 export function effectivePrice(app: StoreApp, now = new Date()): number {
@@ -95,9 +80,9 @@ export class StoreCheckoutService {
   constructor(
     private readonly supabaseService: SupabaseService,
     private readonly sanityService: SanityService,
-    private readonly configService: ConfigService,
     private readonly purchasesService: PurchasesService,
     private readonly issuesService: IssuesService,
+    private readonly providers: PaymentProvidersService,
   ) { }
 
   // ---------------------------------------------------------------- pricing
@@ -152,7 +137,21 @@ export class StoreCheckoutService {
       return { provider: 'paystack' as const, reference, amount: total, currency: 'GHS', email: billing.organizationEmail, items };
     }
 
-    const checkoutUrl = await this.initiateHubtel(reference, total, items, billing);
+    const site = this.providers.siteOrigin();
+    let checkoutUrl: string;
+    try {
+      checkoutUrl = await this.providers.initiateHubtel({
+        reference,
+        amount: total,
+        description: items.length === 1 ? `Payment for ${items[0].title}` : `Payment for ${items.length} apps`,
+        returnUrl: `${site}/order-complete?reference=${reference}`,
+        cancellationUrl: `${site}/checkout/${items[0].productId}?cancelled=1`,
+        payee: { name: billing.organizationName, phone: billing.phoneNumber, email: billing.organizationEmail },
+      });
+    } catch (error) {
+      await this.issuesService.logApiError(error as Error, 'hubtel_initiate', 'POST', { reference });
+      throw error;
+    }
     return { provider: 'hubtel' as const, reference, amount: total, currency: 'GHS', checkoutUrl, items };
   }
 
@@ -160,14 +159,14 @@ export class StoreCheckoutService {
 
   /** Browser return, webhook and polling all end up here for Paystack. */
   async confirmPaystack(reference: string) {
-    const confirmation = await this.checkPaystack(reference);
+    const confirmation = await this.providers.checkPaystack(reference);
     if (!confirmation.paid) return this.orderStatus(reference);
     return this.fulfil(reference, 'paystack', confirmation);
   }
 
   /** Hubtel callback, the return page and polling all end up here for Hubtel. */
   async confirmHubtel(reference: string) {
-    const confirmation = await this.checkHubtel(reference);
+    const confirmation = await this.providers.checkHubtel(reference);
     if (!confirmation.paid) return this.orderStatus(reference);
     return this.fulfil(reference, 'hubtel', confirmation);
   }
@@ -309,92 +308,6 @@ export class StoreCheckoutService {
     }
 
     return this.orderStatus(reference);
-  }
-
-  // ---------------------------------------------------------------- providers
-
-  private async checkPaystack(reference: string): Promise<ProviderConfirmation> {
-    const secretKey = this.configService.get<string>('PAYSTACK_SECRET_KEY');
-    if (!secretKey) throw new InternalServerErrorException('Paystack is not configured');
-    const res = await fetch(`https://api.paystack.co/transaction/verify/${encodeURIComponent(reference)}`, {
-      headers: { Authorization: `Bearer ${secretKey}` },
-    });
-    const body: any = await res.json().catch(() => null);
-    const data = body?.data;
-    const paid = res.ok && body?.status === true && data?.status === 'success' && (data?.currency ?? 'GHS') === 'GHS';
-    return {
-      paid,
-      amountGhs: paid ? Number(data.amount) / 100 : 0,
-      method: data?.channel,
-      externalId: data?.id != null ? String(data.id) : undefined,
-      raw: data ? { id: data.id, status: data.status, amount: data.amount, currency: data.currency, channel: data.channel, paid_at: data.paid_at } : body,
-    };
-  }
-
-  private hubtelAuth() {
-    const apiId = this.configService.get<string>('HUBTEL_API_ID');
-    const apiKey = this.configService.get<string>('HUBTEL_API_KEY');
-    const merchant = this.configService.get<string>('HUBTEL_MERCHANT_ACCOUNT');
-    if (!apiId || !apiKey || !merchant) throw new InternalServerErrorException('Hubtel is not configured');
-    return { basic: Buffer.from(`${apiId}:${apiKey}`).toString('base64'), merchant };
-  }
-
-  private publicApiOrigin() {
-    const url = this.configService.get<string>('PUBLIC_API_URL') || this.configService.get<string>('FRONTEND_URL') || '';
-    return url.replace(/\/+$/, '').replace(/\/api$/, '');
-  }
-
-  private siteOrigin() {
-    return (this.configService.get<string>('FRONTEND_URL') || 'https://fmtsoftware.com').replace(/\/+$/, '');
-  }
-
-  /** Creates a Hubtel hosted checkout server-side; the browser only gets the page URL. */
-  private async initiateHubtel(reference: string, total: number, items: PricedItem[], billing: BillingDetailsDto) {
-    const { basic, merchant } = this.hubtelAuth();
-    const site = this.siteOrigin();
-    const res = await fetch('https://payproxyapi.hubtel.com/items/initiate', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Basic ${basic}` },
-      body: JSON.stringify({
-        totalAmount: total,
-        description: items.length === 1 ? `Payment for ${items[0].title}` : `Payment for ${items.length} apps`,
-        callbackUrl: `${this.publicApiOrigin()}/api/payments/hubtel/callback`,
-        returnUrl: `${site}/order-complete?reference=${reference}`,
-        cancellationUrl: `${site}/checkout/${items[0].productId}?cancelled=1`,
-        merchantAccountNumber: merchant,
-        clientReference: reference,
-        payeeName: billing.organizationName,
-        payeeMobileNumber: toHubtelMsisdn(billing.phoneNumber),
-        payeeEmail: billing.organizationEmail,
-      }),
-    });
-    const body: any = await res.json().catch(() => null);
-    const url = body?.data?.checkoutDirectUrl || body?.data?.checkoutUrl;
-    if (!res.ok || !url) {
-      await this.issuesService.logApiError('Hubtel initiate failed', 'hubtel_initiate', 'POST', { reference, status: res.status, body });
-      throw new BadRequestException('Could not start the Hubtel payment. Please try again or pay with Paystack.');
-    }
-    return url as string;
-  }
-
-  /** Asks Hubtel directly whether a reference was paid. */
-  private async checkHubtel(reference: string): Promise<ProviderConfirmation> {
-    const { basic, merchant } = this.hubtelAuth();
-    const res = await fetch(
-      `https://rmsc.hubtel.com/v1/merchantaccount/merchants/${merchant}/transactions/status?clientReference=${encodeURIComponent(reference)}`,
-      { headers: { Authorization: `Basic ${basic}` } },
-    );
-    const body: any = await res.json().catch(() => null);
-    const data = body?.data ?? body ?? {};
-    const status = String(data.status ?? data.Status ?? '').toLowerCase();
-    const paid = res.ok && ['paid', 'success', 'successful', 'completed'].includes(status);
-    return {
-      paid,
-      amountGhs: paid ? Number(data.amount ?? data.Amount ?? 0) : 0,
-      method: data.paymentMethod ?? data.PaymentMethod,
-      externalId: data.transactionId ?? data.externalTransactionId ?? undefined,
-      raw: body,
-    };
   }
 
   // ---------------------------------------------------------------- helpers

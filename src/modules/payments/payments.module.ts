@@ -4,9 +4,11 @@ import { PaymentsController } from './payments.controller';
 import { StoreCheckoutService } from './store-checkout.service';
 import { PurchasesModule } from '../purchases/purchases.module';
 import { IssuesModule } from '../issues/issues.module';
+import { PaymentProvidersModule } from '../../common/payment-providers/payment-providers.module';
+import { PaymentPlansModule } from '../payment-plans/payment-plans.module';
 
 @Module({
-  imports: [PurchasesModule, IssuesModule],
+  imports: [PurchasesModule, IssuesModule, PaymentProvidersModule, PaymentPlansModule],
   controllers: [PaymentsController],
   providers: [PaymentsService, StoreCheckoutService],
 })
