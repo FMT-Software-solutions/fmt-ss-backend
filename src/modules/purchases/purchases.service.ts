@@ -4,6 +4,7 @@ import { SupabaseService } from '../../common/supabase/supabase.service';
 import { IssuesService } from '../issues/issues.service';
 import { SanityService } from '../../common/sanity/sanity.service';
 import { ResendService } from '../../common/resend/resend.service';
+import { AppsService } from '../apps/apps.service';
 import { BillingDetailsDto, PurchaseItemDto, TrialRequestDto, FreeAccessRequestDto, GeneralPurchaseDto } from './dto/purchase.dto';
 import { Database } from '../../common/supabase/database.types';
 
@@ -13,9 +14,13 @@ type PurchaseInsert = Database['public']['Tables']['purchases']['Insert'];
 export interface ProvisioningAppDetail {
   _id: string;
   title: string;
+  slug?: string;
+  trialDays?: number;
   platforms?: Record<string, any>;
   appProvisioning?: Record<string, any>;
 }
+
+const DEFAULT_TRIAL_DAYS = 30;
 
 @Injectable()
 export class PurchasesService {
@@ -25,6 +30,7 @@ export class PurchasesService {
     private readonly sanityService: SanityService,
     private readonly resendService: ResendService,
     private readonly issuesService: IssuesService,
+    private readonly appsService: AppsService,
   ) { }
 
   private generateEmailTemplate(title: string, content: string) {
@@ -410,6 +416,8 @@ export class PurchasesService {
     const query = `*[_type == "premiumApp" && _id in $ids && isPublished == true] {
       _id,
       title,
+      "slug": slug.current,
+      trialDays,
       platforms {
         desktop {
           windows {
@@ -521,6 +529,12 @@ export class PurchasesService {
       await this.provisionApps(organizationId, organizationDetails, appProvisioningDetails, 'trial');
     }
 
+    // The apps' provisioning functions default to a 30-day trial; the length
+    // set in Sanity wins, written straight into the app's organization.
+    const trialDays = Math.min(365, Math.max(1, Math.round(Number(app.trialDays) || DEFAULT_TRIAL_DAYS)));
+    const trialEndsAt = new Date(Date.now() + trialDays * 86_400_000).toISOString();
+    await this.setAppTrialEnd(app, organizationId, trialEndsAt);
+
     // Record app access in organization_apps table
     const adminSupabase: any = this.supabaseService.getServiceRoleClient();
     const { error: accessError } = await adminSupabase
@@ -530,6 +544,7 @@ export class PurchasesService {
         app_id: productId,
         status: 'trial',
         plan_type: 'trial',
+        expires_at: trialEndsAt,
         access_granted_at: new Date().toISOString(),
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString()
@@ -552,8 +567,47 @@ export class PurchasesService {
       success: true,
       message: 'Trial started successfully',
       organizationId,
-      // purchaseId: purchase.id // No purchase ID anymore
+      trialDays,
+      trialEndsAt,
+      app: {
+        title: app.title,
+        slug: app.slug,
+        webAppUrl: app.platforms?.web?.available ? app.platforms.web.webAppUrl : null,
+      },
     };
+  }
+
+  /**
+   * Sets the trial end on the app's own organization. Skipped (and logged) if
+   * the app isn't connected to this backend; the app then keeps its default.
+   * Never touches an organization that has already purchased.
+   */
+  private async setAppTrialEnd(app: ProvisioningAppDetail, organizationId: string, trialEndsAt: string) {
+    const client: any = this.appsService.getClientForProjectUrl(app.appProvisioning?.supabaseUrl);
+    if (!client) {
+      await this.logPurchaseIssue({
+        title: 'Trial length not applied',
+        description: `${app.title} is not connected to the admin backend, so its trial uses the app's default length`,
+        organizationId,
+        severity: 'low',
+        metadata: { productId: app._id },
+      });
+      return;
+    }
+    const { error } = await client
+      .from('organizations')
+      .update({ trial_end_date: trialEndsAt, updated_at: new Date().toISOString() })
+      .eq('id', organizationId)
+      .eq('has_purchased', false);
+    if (error) {
+      await this.logPurchaseIssue({
+        title: 'Failed to set trial end date',
+        description: `${app.title}: ${error.message}`,
+        organizationId,
+        severity: 'medium',
+        metadata: { productId: app._id, trialEndsAt },
+      });
+    }
   }
 
   async processFreeAccessRequest(payload: FreeAccessRequestDto) {

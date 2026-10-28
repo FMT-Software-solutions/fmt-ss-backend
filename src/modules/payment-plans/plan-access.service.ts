@@ -29,19 +29,11 @@ export class PlanAccessService {
       `*[_type == "premiumApp" && _id == $id][0]{ appProvisioning }`,
       { id: productId },
     );
-    const url = product?.appProvisioning?.supabaseUrl;
-    const host = (u?: string) => {
-      try {
-        return u ? new URL(u).host : '';
-      } catch {
-        return '';
-      }
-    };
-    const app = this.apps.getAllApps().find((a) => a.supabaseUrl && host(a.supabaseUrl) === host(url));
-    if (!app || !this.apps.isConfigured(app.id)) {
+    const client = this.apps.getClientForProjectUrl(product?.appProvisioning?.supabaseUrl);
+    if (!client) {
       throw new Error('This app is not connected to the admin backend, so access must be changed in the app');
     }
-    return this.apps.getSupabaseClient(app.id);
+    return client;
   }
 
   private async setAppAccess(productId: string, organizationId: string, purchased: boolean) {

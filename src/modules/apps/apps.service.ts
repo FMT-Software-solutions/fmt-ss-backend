@@ -48,6 +48,25 @@ export class AppsService {
     return Array.from(this.configs.values());
   }
 
+  /**
+   * The service-role client for the app whose Supabase project is at `url`
+   * (Sanity products store their provisioning URL, not our registry id).
+   * Null when no configured app matches.
+   */
+  getClientForProjectUrl(url: string | undefined | null): SupabaseClient | null {
+    const host = (value?: string | null) => {
+      try {
+        return value ? new URL(value).host : '';
+      } catch {
+        return '';
+      }
+    };
+    const target = host(url);
+    if (!target) return null;
+    const app = this.getAllApps().find((a) => host(a.supabaseUrl) === target);
+    return app ? (this.clients.get(app.id) ?? null) : null;
+  }
+
   /** True when the app has usable Supabase credentials. */
   isConfigured(appId: string): boolean {
     return this.clients.has(appId);

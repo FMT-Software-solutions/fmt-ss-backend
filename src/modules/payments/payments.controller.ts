@@ -17,7 +17,7 @@ import type { Request } from 'express';
 import { PaymentsService } from './payments.service';
 import { StoreCheckoutService } from './store-checkout.service';
 import { PaymentPlansService } from '../payment-plans/payment-plans.service';
-import { ConfirmStoreOrderDto, CreateStoreOrderDto } from './dto/store-order.dto';
+import { ConfirmStoreOrderDto, CreateStoreOrderDto, QuoteStoreOrderDto } from './dto/store-order.dto';
 import { VerifySmsPurchaseDto } from './dto/verify-sms-purchase.dto';
 import { InitializeSmsPurchaseDto } from './dto/initialize-sms-purchase.dto';
 import { InitializeStoragePurchaseDto } from './dto/initialize-storage-purchase.dto';
@@ -35,6 +35,13 @@ export class PaymentsController {
     // ---------------------------------------------------------------- store
     // Website orders. The server prices the order and issues the reference;
     // every confirmation path asks the provider and checks the amount.
+
+    @Post('orders/quote')
+    @UseGuards(ThrottlerGuard)
+    @ApiOperation({ summary: 'Price an order and check a discount code' })
+    quoteStoreOrder(@Body() payload: QuoteStoreOrderDto) {
+        return this.storeCheckout.quote(payload.productIds, payload.discountCode, payload.email);
+    }
 
     @Post('orders')
     @UseGuards(ThrottlerGuard)

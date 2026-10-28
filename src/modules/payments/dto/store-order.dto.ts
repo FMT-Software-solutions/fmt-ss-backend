@@ -1,6 +1,6 @@
-import { ApiProperty } from '@nestjs/swagger';
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
-import { ArrayMaxSize, ArrayMinSize, IsArray, IsIn, IsString, Matches, ValidateNested } from 'class-validator';
+import { ArrayMaxSize, ArrayMinSize, IsArray, IsEmail, IsIn, IsOptional, IsString, Matches, MaxLength, ValidateNested } from 'class-validator';
 import { BillingDetailsDto } from '../../purchases/dto/purchase.dto';
 
 /**
@@ -23,6 +23,33 @@ export class CreateStoreOrderDto {
   @ApiProperty({ enum: ['paystack', 'hubtel'] })
   @IsIn(['paystack', 'hubtel'])
   provider: 'paystack' | 'hubtel';
+
+  @ApiPropertyOptional()
+  @IsString()
+  @MaxLength(40)
+  @IsOptional()
+  discountCode?: string;
+}
+
+/** Prices an order (and checks a discount code) without creating it. */
+export class QuoteStoreOrderDto {
+  @ApiProperty({ type: [String] })
+  @IsArray()
+  @ArrayMinSize(1)
+  @ArrayMaxSize(10)
+  @IsString({ each: true })
+  productIds: string[];
+
+  @ApiPropertyOptional()
+  @IsString()
+  @MaxLength(40)
+  @IsOptional()
+  discountCode?: string;
+
+  @ApiPropertyOptional({ description: 'Buyer email, for per-customer code limits' })
+  @IsEmail()
+  @IsOptional()
+  email?: string;
 }
 
 export class ConfirmStoreOrderDto {

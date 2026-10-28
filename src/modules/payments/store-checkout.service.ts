@@ -13,6 +13,7 @@ import { PurchasesService } from '../purchases/purchases.service';
 import type { BillingDetailsDto } from '../purchases/dto/purchase.dto';
 import type { CreateStoreOrderDto } from './dto/store-order.dto';
 import { PaymentProvidersService, type ProviderConfirmation } from '../../common/payment-providers/payment-providers.service';
+import { DiscountsService } from '../discounts/discounts.service';
 
 /**
  * Website (marketplace) orders.
@@ -83,6 +84,7 @@ export class StoreCheckoutService {
     private readonly purchasesService: PurchasesService,
     private readonly issuesService: IssuesService,
     private readonly providers: PaymentProvidersService,
+    private readonly discounts: DiscountsService,
   ) { }
 
   // ---------------------------------------------------------------- pricing
@@ -107,11 +109,20 @@ export class StoreCheckoutService {
     return { items, total: round2(items.reduce((s, i) => s + i.price, 0)) };
   }
 
+  /** Server price for the checkout summary, with a discount code if given. */
+  async quote(productIds: string[], discountCode?: string, email?: string) {
+    const { items, total: subtotal } = await this.priceProducts(productIds);
+    const discount = discountCode?.trim()
+      ? await this.discounts.apply(discountCode, items.map((i) => ({ productId: i.productId, price: i.price })), email)
+      : null;
+    return { items, subtotal, discount, total: round2(subtotal - (discount?.amount ?? 0)) };
+  }
+
   // ---------------------------------------------------------------- create
 
   async createOrder(dto: CreateStoreOrderDto) {
-    const { items, total } = await this.priceProducts(dto.productIds);
     const billing = dto.billingDetails;
+    const { items, subtotal, discount, total } = await this.quote(dto.productIds, dto.discountCode, billing.organizationEmail);
 
     for (const item of items) {
       const { hasAccess } = await this.purchasesService.checkAppAccess(billing.organizationEmail, item.productId, 'buy');
@@ -129,7 +140,13 @@ export class StoreCheckoutService {
       items,
       paymentProvider: dto.provider,
       paymentMethod: dto.provider,
-      paymentDetails: { source: 'store', billingDetails: billing, createdAt: new Date().toISOString() },
+      paymentDetails: {
+        source: 'store',
+        billingDetails: billing,
+        subtotal,
+        discount: discount ? { codeId: discount.codeId, code: discount.code, amount: discount.amount } : null,
+        createdAt: new Date().toISOString(),
+      },
     });
 
     if (dto.provider === 'paystack') {
@@ -266,6 +283,18 @@ export class StoreCheckoutService {
       ? await this.purchasesService.provisionApps(purchase.organization_id, billing, details, 'buy')
       : [];
     await this.purchasesService.recordAppAccess(purchase.organization_id, productIds, 'buy');
+
+    const discount = purchase.payment_details?.discount;
+    if (discount?.codeId) {
+      await this.discounts.recordRedemption({
+        codeId: discount.codeId,
+        purchaseId: purchase.id,
+        organizationId: purchase.organization_id,
+        email: billing.organizationEmail,
+        amount: Number(discount.amount),
+      });
+    }
+
     await supabase
       .from('purchases')
       .update({
