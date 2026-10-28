@@ -725,6 +725,8 @@ export class PurchasesService {
           app_id: productId,
           status: mode === 'trial' ? 'trial' : 'active',
           plan_type: mode === 'buy' ? 'paid' : mode,
+          // Buying or free access ends any trial; a trial sets its own end afterwards.
+          ...(mode === 'trial' ? {} : { expires_at: null }),
           access_granted_at: now,
           updated_at: now,
         })),

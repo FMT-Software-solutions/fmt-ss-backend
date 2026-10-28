@@ -60,12 +60,13 @@ export class DiscountsService {
       if (row.first_purchase_only) {
         const { data: org } = await this.db.from('organizations').select('id').eq('email', normalized).maybeSingle();
         if (org) {
-          const { count: paid } = await this.db
-            .from('purchases')
+          // Owning any app counts, however it was bought (store, plan, admin); trials don't.
+          const { count: owned } = await this.db
+            .from('organization_apps')
             .select('id', { count: 'exact', head: true })
             .eq('organization_id', org.id)
-            .eq('status', 'completed');
-          if ((paid ?? 0) > 0) throw new BadRequestException('This code is for first purchases only');
+            .in('status', ['active', 'suspended']);
+          if ((owned ?? 0) > 0) throw new BadRequestException('This code is for first purchases only');
         }
       }
     }
